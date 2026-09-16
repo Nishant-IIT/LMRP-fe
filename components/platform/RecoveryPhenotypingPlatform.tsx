@@ -2,8 +2,11 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { ScreenId, MeasureId, Cohort, QualityReport, Features, ClusterMetrics, BootstrapResult, ClassifierResult } from "@/lib/types";
+import { fmt, pct1 } from "@/lib/format";
+import { download } from "@/lib/download";
 import { InfoTipProvider } from "./InfoTip";
 import { Nav } from "./Nav";
+import { DashboardScreen } from "./screens/DashboardScreen";
 
 type EngineModule = typeof import("@/lib/phenotype-engine");
 
@@ -88,6 +91,10 @@ interface PlatformState {
   entry: EntryState;
   cohort: Cohort | null;
   quality: QualityReport | null;
+  // Held in state (not a ref) so the render body can read it directly —
+  // reading a ref during render is disallowed. The imperative functions
+  // below additionally keep engineRef for use outside render.
+  engine: EngineModule | null;
 }
 
 const ENROL_DEFAULT: EnrolState = {
@@ -145,6 +152,7 @@ function initialState(): PlatformState {
     entry: { ...ENTRY_DEFAULT },
     cohort: null,
     quality: null,
+    engine: null,
   };
 }
 
@@ -272,7 +280,7 @@ export function RecoveryPhenotypingPlatform() {
         engineRef.current = E;
         const cohort = E.makeCohort(300, stateRef.current.seed);
         const quality = E.qualityReport(cohort);
-        patch({ ready: true, cohort, quality });
+        patch({ ready: true, cohort, quality, engine: E });
         recompute();
       })
       .catch((e) => {
@@ -286,7 +294,7 @@ export function RecoveryPhenotypingPlatform() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  if (!state.ready) {
+  if (!state.ready || !state.cohort || !state.quality || !state.engine) {
     return (
       <InfoTipProvider>
         <div style={{ padding: 24 }}>{state.err ? `Failed to load: ${state.err}` : "Loading…"}</div>
@@ -294,11 +302,94 @@ export function RecoveryPhenotypingPlatform() {
     );
   }
 
+  // Derived values several screens share, recomputed from state each render
+  // (mirrors the original renderVals()'s `const run = S.run, cur = ...`).
+  const E = state.engine;
+  const S = state;
+  const run = S.run;
+  const cur = run ? run.sweep[S.k] : null;
+  const lab = cur ? cur.lab : null;
+  const met = cur ? cur.m : null;
+  const used = E.ACTIVE.filter((m) => S.enabled.includes(m.id));
+
   let screenBody: React.ReactNode;
   switch (state.screen) {
-    case "dashboard":
-      screenBody = <div>Dashboard — TODO</div>;
+    case "dashboard": {
+      const tpCards = E.TIMEPOINTS.map((tp, ti) => {
+        const n = S.quality!.grid[ti].assessed;
+        return { label: tp.label, n, pct: (100 * n) / S.cohort!.n, pctLabel: pct1((100 * n) / S.cohort!.n) };
+      });
+      const cw = 72,
+        chh = 30,
+        mx0 = 92,
+        my0 = 30;
+      const missCols = E.TIMEPOINTS.map((tp, i) => ({ label: tp.short, x: mx0 + cw * i + cw / 2, y: my0 - 12 }));
+      const missRows = E.ACTIVE.map((m, r) => ({ label: m.name, y: my0 + chh * r + chh / 2 + 4 }));
+      const missCells = E.ACTIVE.flatMap((m, rIdx) =>
+        E.TIMEPOINTS.map((tp, i) => {
+          const c = S.quality!.grid[i].byMeasure[m.id]!;
+          const p = (100 * c.missing) / (c.missing + c.present);
+          return {
+            x: mx0 + cw * i,
+            y: my0 + chh * rIdx,
+            w: cw,
+            h: chh,
+            op: Math.min(0.92, 0.06 + p / 26),
+            tx: mx0 + cw * i + cw / 2,
+            ty: my0 + chh * rIdx + chh / 2 + 4,
+            txt: p < 0.05 ? "0" : p.toFixed(1),
+            ink: p > 12 ? "#f3f2f2" : "#201e1d",
+          };
+        })
+      );
+      const prov = S.solutions.find((x) => x.id === S.provisional);
+      screenBody = (
+        <DashboardScreen
+          V={{
+            tpCards,
+            quality: {
+              completeBaseline: S.quality!.completeBaseline,
+              incompleteBaseline: S.quality!.incompleteBaseline,
+              pMissLabel: pct1(S.quality!.participantMissingness.mean),
+            },
+            flags: S.quality!.flags,
+            missGrid: {
+              vb: `0 0 ${mx0 + cw * 6 + 4} ${my0 + chh * E.ACTIVE.length + 6}`,
+              cols: missCols,
+              rows: missRows,
+              cells: missCells,
+            },
+            status: {
+              algoName: E.ALGORITHMS.find((a) => a.id === S.algo)!.name,
+              featureLine: `${run ? run.feat.names.length : 0} features · ${run ? run.feat.setName : ""}`,
+              smallest: met ? `${met.smallest} (${met.smallestPct.toFixed(1)}%)` : "—",
+              sil: met ? fmt(met.silhouette) : "—",
+              db: met ? fmt(met.db) : "—",
+              stability: S.boot ? fmt(S.boot.meanARI) : "not run",
+              stabilityNote: S.boot ? `${S.boot.iters} bootstrap iterations` : "run it on the Profiles screen",
+              clfAcc: S.clf ? pct1(100 * S.clf.balanced) : "—",
+              clfNote: S.clf
+                ? `balanced accuracy · ${E.EARLY_MODELS.find((m) => m.id === S.clfModel)!.info.toLowerCase()}`
+                : "computing",
+              provisional: prov ? prov.id : "none marked",
+              provisionalNote: prov ? `K = ${prov.k} · ${prov.algoName}` : "researcher decision, not automatic",
+            },
+            k: S.k,
+            onExportQuality: () => {
+              const rows: (string | number)[][] = [["measure", "timepoint", "present", "missing", "pct_missing"]];
+              E.ACTIVE.forEach((m) =>
+                E.TIMEPOINTS.forEach((tp, i) => {
+                  const c = S.quality!.grid[i].byMeasure[m.id]!;
+                  rows.push([m.name, tp.id, c.present, c.missing, ((100 * c.missing) / (c.present + c.missing)).toFixed(2)]);
+                })
+              );
+              download("data-quality-synthetic-v4.csv", rows.map((r) => r.join(",")).join("\n"));
+            },
+          }}
+        />
+      );
       break;
+    }
     case "enrol":
       screenBody = <div>Enrolment — TODO</div>;
       break;
