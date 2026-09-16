@@ -1,6 +1,29 @@
 // Shared data shapes for the Recovery Phenotyping Platform — the synthetic
 // cohort, the analysis engine's outputs, and the view-model each screen reads.
 
+export type ScreenId =
+  | "dashboard"
+  | "enrol"
+  | "participants"
+  | "entry"
+  | "measures"
+  | "discovery"
+  | "solutions"
+  | "profiles"
+  | "classify";
+
+export const SCREENS: { id: ScreenId; name: string }[] = [
+  { id: "dashboard", name: "Dashboard" },
+  { id: "enrol", name: "Enrolment" },
+  { id: "participants", name: "Participants" },
+  { id: "entry", name: "Assessment" },
+  { id: "measures", name: "Measures" },
+  { id: "discovery", name: "Discovery" },
+  { id: "solutions", name: "Solutions" },
+  { id: "profiles", name: "Profiles" },
+  { id: "classify", name: "Classification" },
+];
+
 export type MeasureId = "nprs" | "odi" | "sts" | "fabq" | "pseq" | "tug";
 
 export interface Timepoint {

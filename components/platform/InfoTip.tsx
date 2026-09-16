@@ -21,16 +21,26 @@ const InfoTipContext = createContext<InfoTipContextValue | null>(null);
 
 export function InfoTipProvider({ children }: { children: React.ReactNode }) {
   const [tip, setTip] = useState<TipState | null>(null);
-  const tipRef = useRef(tip);
-  tipRef.current = tip;
+  // Mirrors `tip` so event handlers below can read the just-set value
+  // synchronously (React state updates aren't visible until the next
+  // render). Written only outside of render, from these same callbacks.
+  const tipRef = useRef<TipState | null>(null);
 
-  const place = useCallback((id: string, el: HTMLElement, pinned: boolean) => {
-    const r = el.getBoundingClientRect();
-    const left = Math.max(10, Math.min(r.left - 8, window.innerWidth - 300));
-    const below = r.bottom + 10;
-    const top = below + 190 > window.innerHeight ? Math.max(10, r.top - 200) : below;
-    setTip({ id, left: Math.round(left), top: Math.round(top), pinned });
+  const setBoth = useCallback((next: TipState | null) => {
+    tipRef.current = next;
+    setTip(next);
   }, []);
+
+  const place = useCallback(
+    (id: string, el: HTMLElement, pinned: boolean) => {
+      const r = el.getBoundingClientRect();
+      const left = Math.max(10, Math.min(r.left - 8, window.innerWidth - 300));
+      const below = r.bottom + 10;
+      const top = below + 190 > window.innerHeight ? Math.max(10, r.top - 200) : below;
+      setBoth({ id, left: Math.round(left), top: Math.round(top), pinned });
+    },
+    [setBoth]
+  );
 
   const show = useCallback(
     (id: string, el: HTMLElement) => {
@@ -42,17 +52,17 @@ export function InfoTipProvider({ children }: { children: React.ReactNode }) {
   const pin = useCallback(
     (id: string, el: HTMLElement) => {
       const t = tipRef.current;
-      if (t && t.id === id && t.pinned) setTip(null);
+      if (t && t.id === id && t.pinned) setBoth(null);
       else place(id, el, true);
     },
-    [place]
+    [place, setBoth]
   );
 
   const close = useCallback(() => {
-    if (!(tipRef.current && tipRef.current.pinned)) setTip(null);
-  }, []);
+    if (!(tipRef.current && tipRef.current.pinned)) setBoth(null);
+  }, [setBoth]);
 
-  const closeAlways = useCallback(() => setTip(null), []);
+  const closeAlways = useCallback(() => setBoth(null), [setBoth]);
 
   useEffect(() => {
     document.addEventListener("click", closeAlways);
