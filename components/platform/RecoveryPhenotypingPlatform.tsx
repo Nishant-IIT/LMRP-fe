@@ -18,6 +18,8 @@ import { DiscoveryScreen } from "./screens/DiscoveryScreen";
 import type { MetricLineChartData } from "./charts/MetricLineChart";
 import type { HBarRow } from "./charts/HBarList";
 import { SolutionsScreen } from "./screens/SolutionsScreen";
+import { ProfilesScreen, type ClusterCard, type BootVals } from "./screens/ProfilesScreen";
+import type { ClusterTrajectoryLine } from "./charts/ClusterTrajectoryChart";
 
 type EngineModule = typeof import("@/lib/phenotype-engine");
 
@@ -1106,9 +1108,119 @@ export function RecoveryPhenotypingPlatform() {
       );
       break;
     }
-    case "profiles":
-      screenBody = <div>Profiles — TODO</div>;
+    case "profiles": {
+      const CC = E.CLUSTER_COLORS;
+      const profs = lab && run ? E.profile(S.cohort!, run.feat, lab, S.k, S.enabled) : [];
+      const clusters: ClusterCard[] = profs.map((p) => {
+        const pw = 300,
+          ph = 132,
+          pl = 26;
+        const gxc = (w: number) => gx(w, pw, pl, 42);
+        const gyc = (v: number) => gy(v, 0.1, 1.1, ph);
+        const lines: ClusterTrajectoryLine[] = p.domains.map((d, di) => {
+          const b = d.traj[0].mean || 1;
+          const present = d.traj.filter((t) => t.mean !== null);
+          const pts = present.map((t) => gxc(t.week).toFixed(1) + "," + gyc(t.mean! / b).toFixed(1));
+          const last = present[present.length - 1];
+          return {
+            name: d.measure.name,
+            color: ["#ec3013", "#201e1d", "#7d7979", "#ae1800"][di % 4],
+            w: di === 0 ? 2.5 : 1.8,
+            dash: di === 3 ? "4 3" : "0",
+            points: pts.join(" "),
+            lx: gxc(last.week) + 4,
+            ly: gyc(last.mean! / b) + 3,
+          };
+        });
+        // De-overlap the trailing labels: sorted by Y, push down anything
+        // closer than 10px to the previous label.
+        lines
+          .map((l, i) => ({ i, ly: l.ly }))
+          .sort((a, b) => a.ly - b.ly)
+          .reduce((prev, e) => {
+            const y = Math.max(e.ly, prev + 10);
+            lines[e.i].ly = y;
+            return y;
+          }, -1e4);
+        const xTicks = p.domains[0].traj.map((t) => ({ x: gxc(t.week), y: ph - 4, label: t.short }));
+        return {
+          label: p.label,
+          color: CC[p.c],
+          n: p.n,
+          pct: p.pct.toFixed(1) + "%",
+          age: p.age.toFixed(0),
+          female: p.female.toFixed(0) + "%",
+          bmi: p.bmi.toFixed(1),
+          duration: p.duration.toFixed(0) + "w",
+          domains: p.domains.map((d) => ({
+            domain: d.measure.domain,
+            shape: d.shape,
+            delta: (d.relChange >= 0 ? "−" : "+") + Math.abs(100 * d.relChange).toFixed(0) + "% by W12",
+          })),
+          chart: { vb: `0 0 ${pw} ${ph}`, zx1: pl, zx2: pw - 42, zy: gyc(1), lines, xTicks, ariaLabel: `${p.label} standardised trajectories` },
+          note: S.notes[p.c] || "",
+          setNote: (ev) => patch((s) => ({ notes: { ...s.notes, [p.c]: ev.target.value } })),
+          stability: S.boot ? S.boot.perCluster[p.c].toFixed(0) + "%" : "not run",
+        };
+      });
+
+      const bootLabel = S.bootBusy ? "running…" : S.boot ? "Re-run" : "Run bootstrap";
+      const boot: BootVals = S.boot
+        ? {
+            meanARI: fmt(S.boot.meanARI),
+            interval: `${fmt(S.boot.lowARI)}–${fmt(S.boot.highARI)}`,
+            iters: S.boot.iters,
+            bars: S.boot.perCluster.map((v, c) => ({ label: "Cluster " + (c + 1), color: CC[c], pct: v, value: v.toFixed(0) + "%" })),
+            note:
+              "Per-cluster stability is the share of bootstrap replicates in which a cluster's members were recovered together. The iteration count is kept low here so the sample stays interactive; the protocol figure is 1,000.",
+          }
+        : {
+            meanARI: "—",
+            interval: "—",
+            iters: S.bootBusy ? "…" : 0,
+            bars: [],
+            note: "Stability has not been assessed for this specification. Cluster profiles should not be interpreted before it has.",
+          };
+
+      let truthCols: { label: string }[] = [];
+      let truthRows: { label: string; cells: { txt: string; bg: string }[] }[] = [];
+      let truthARI = "—";
+      if (lab && run) {
+        const truth = run.feat.keep.map((i) => S.cohort!.participants[i].pattern);
+        truthCols = Array.from({ length: S.k }, (_, c) => ({ label: "C" + (c + 1) }));
+        truthRows = E.PATTERNS.map((pt) => {
+          const rowTot = truth.filter((t) => t === pt.id).length;
+          return {
+            label: pt.name,
+            cells: Array.from({ length: S.k }, (_, c) => {
+              const v = truth.filter((t, r) => t === pt.id && lab[r] === c).length;
+              return {
+                txt: v ? String(v) : "·",
+                bg: v ? `color-mix(in srgb, var(--color-accent) ${Math.min(50, Math.round((64 * v) / (rowTot || 1)))}%, transparent)` : "transparent",
+              };
+            }),
+          };
+        });
+        truthARI = fmt(E.ari(truth, lab));
+      }
+
+      screenBody = (
+        <ProfilesScreen
+          V={{
+            clusters,
+            bootIters: S.bootIters,
+            setBootIters: (ev) => set("bootIters", +ev.target.value || 25),
+            bootLabel,
+            onRunBoot: runBoot,
+            boot,
+            truthCols,
+            truthRows,
+            truthARI,
+          }}
+        />
+      );
       break;
+    }
     case "classify":
       screenBody = <div>Classification — TODO</div>;
       break;
