@@ -17,6 +17,7 @@ import type { PopulationChartData } from "./charts/PopulationChart";
 import { DiscoveryScreen } from "./screens/DiscoveryScreen";
 import type { MetricLineChartData } from "./charts/MetricLineChart";
 import type { HBarRow } from "./charts/HBarList";
+import { SolutionsScreen } from "./screens/SolutionsScreen";
 
 type EngineModule = typeof import("@/lib/phenotype-engine");
 
@@ -1015,9 +1016,96 @@ export function RecoveryPhenotypingPlatform() {
       );
       break;
     }
-    case "solutions":
-      screenBody = <div>Solutions — TODO</div>;
+    case "solutions": {
+      const solutionRows = S.solutions.map((s) => ({
+        id: s.id,
+        time: s.time,
+        k: s.k,
+        algo: s.algoName,
+        seed: s.seed,
+        featureSet: s.featureSet,
+        nFeat: s.nFeat,
+        measures: s.measures,
+        missing: s.missing,
+        n: s.n,
+        smallest: `${s.met.smallest} (${s.met.smallestPct.toFixed(1)}%)`,
+        sil: fmt(s.met.silhouette),
+        ch: fmt(s.met.ch, 0),
+        db: fmt(s.met.db),
+        stab: s.stab || "not run",
+        bg: S.provisional === s.id ? "var(--color-accent-100)" : "transparent",
+        markLabel: S.provisional === s.id ? "provisional ✓" : "mark",
+        mark: () => set("provisional", S.provisional === s.id ? null : s.id),
+      }));
+      const solutionsNote = S.solutions.length
+        ? "No row is highlighted by the software on quality grounds. Marking a solution provisional records a researcher decision in the analysis record; it does not lock anything."
+        : "No runs kept yet. Configure a run on the Discovery screen and add it to the comparison.";
+      const sensLabel = S.sensBusy ? "running…" : S.sens ? "Re-run sensitivity" : "Run sensitivity analysis";
+      const sensRows = S.sens
+        ? S.sens.map((r) => ({ label: r.label, value: fmt(r.ari), pct: Math.max(0, 100 * r.ari) }))
+        : [{ label: S.sensBusy ? "Computing alternative specifications…" : "Not run for this specification yet", value: "—", pct: 0 }];
+
+      let crossCols: { label: string }[] = [];
+      let crossRows: { label: string; n: number; cells: { txt: string; bg: string }[] }[] = [];
+      let cross = { kappa: "—", ari: "—", v: "—", note: "" };
+      if (lab && run) {
+        const groups: ("low" | "moderate" | "high")[] = ["low", "moderate", "high"];
+        const tab = groups.map(() => new Array(S.k).fill(0));
+        run.feat.keep.forEach((i, r) => {
+          tab[groups.indexOf(S.cohort!.participants[i].conventional)][lab[r]]++;
+        });
+        const tot = run.feat.keep.length;
+        const rowN = tab.map((r) => r.reduce((a, b) => a + b, 0));
+        const colN: number[] = [];
+        for (let c = 0; c < S.k; c++) colN.push(tab.reduce((a, r) => a + r[c], 0));
+        let chi = 0;
+        tab.forEach((r, i) =>
+          r.forEach((o, c) => {
+            const e = (rowN[i] * colN[c]) / tot;
+            if (e > 0) chi += (o - e) ** 2 / e;
+          })
+        );
+        const kmax = Math.min(3, S.k);
+        let agree = 0,
+          expAgree = 0;
+        for (let i = 0; i < kmax; i++) {
+          agree += tab[i][i];
+          expAgree += (rowN[i] * colN[i]) / tot;
+        }
+        crossCols = Array.from({ length: S.k }, (_, c) => ({ label: "C" + (c + 1) }));
+        crossRows = groups.map((g, i) => ({
+          label: g,
+          n: rowN[i],
+          cells: tab[i].map((v) => ({
+            txt: v ? String(v) : "·",
+            bg: v ? `color-mix(in srgb, var(--color-accent) ${Math.min(45, Math.round((60 * v) / (rowN[i] || 1)))}%, transparent)` : "transparent",
+          })),
+        }));
+        cross = {
+          kappa: fmt((agree / tot - expAgree / tot) / (1 - expAgree / tot)),
+          ari: fmt(E.ari(run.feat.keep.map((i) => S.cohort!.participants[i].conventional), lab)),
+          v: fmt(Math.sqrt(chi / (tot * Math.min(2, S.k - 1)))),
+          note: `Low agreement is a result, not a failure: it is the case that the conventional grouping and the data-derived phenotypes are not the same partition. χ² = ${chi.toFixed(1)}, df = ${2 * (S.k - 1)}.`,
+        };
+      }
+
+      screenBody = (
+        <SolutionsScreen
+          V={{
+            solutionRows,
+            solutionsNote,
+            sensLabel,
+            onRunSensitivity: runSensitivity,
+            sensRows,
+            k: S.k,
+            crossCols,
+            crossRows,
+            cross,
+          }}
+        />
+      );
       break;
+    }
     case "profiles":
       screenBody = <div>Profiles — TODO</div>;
       break;

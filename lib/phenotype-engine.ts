@@ -552,7 +552,10 @@ export function metrics(Z: number[][], lab: number[], k: number): ClusterMetrics
   };
 }
 
-export function ari(a: number[], b: number[]): number {
+// Doubly generic on purpose: the UI compares category labels (e.g. the
+// conventional risk group) against cluster ids — two different label
+// spaces, paired positionally, never compared to each other directly.
+export function ari<A, B>(a: A[], b: B[]): number {
   const A = [...new Set(a)],
     B = [...new Set(b)];
   const tab = A.map(() => B.map(() => 0));
