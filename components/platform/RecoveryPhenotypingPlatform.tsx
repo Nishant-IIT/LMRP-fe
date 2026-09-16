@@ -7,6 +7,7 @@ import { download } from "@/lib/download";
 import { gx, gy, ticks, W, PL, PR, PB } from "@/lib/svg-chart";
 import { InfoTipProvider } from "./InfoTip";
 import { Nav } from "./Nav";
+import { AnalysisRecordDrawer } from "./AnalysisRecordDrawer";
 import { DashboardScreen } from "./screens/DashboardScreen";
 import { EnrolmentScreen } from "./screens/EnrolmentScreen";
 import { AssessmentEntryScreen } from "./screens/AssessmentEntryScreen";
@@ -358,6 +359,70 @@ export function RecoveryPhenotypingPlatform() {
   const lab = cur ? cur.lab : null;
   const met = cur ? cur.m : null;
   const used = E.ACTIVE.filter((m) => S.enabled.includes(m.id));
+  const prov = S.solutions.find((x) => x.id === S.provisional);
+
+  // Export functions — shared between the screen that surfaces each one
+  // inline (Dashboard/Discovery) and the analysis-record drawer, which can
+  // be opened from any screen.
+  const exportQuality = () => {
+    const rows: (string | number)[][] = [["measure", "timepoint", "present", "missing", "pct_missing"]];
+    E.ACTIVE.forEach((m) =>
+      E.TIMEPOINTS.forEach((tp, i) => {
+        const c = S.quality!.grid[i].byMeasure[m.id]!;
+        rows.push([m.name, tp.id, c.present, c.missing, ((100 * c.missing) / (c.present + c.missing)).toFixed(2)]);
+      })
+    );
+    download("data-quality-synthetic-v4.csv", rows.map((r) => r.join(",")).join("\n"));
+  };
+  const exportFeatures = () => {
+    if (!run) return;
+    const rows: (string | number)[][] = [["study_id", "cluster"].concat(run.feat.names.map((n) => n.replace(/[ →]+/g, "_")))];
+    run.feat.keep.forEach((i, r) =>
+      rows.push(([S.cohort!.participants[i].sid, lab ? lab[r] + 1 : ""] as (string | number)[]).concat(run.feat.Z[r].map((v) => v.toFixed(4))))
+    );
+    download(`features-k${S.k}-${run.algo}.csv`, rows.map((r) => r.join(",")).join("\n"));
+  };
+  const exportRawData = (clean?: boolean) => {
+    const head = ["study_id", "timepoint", "week", "assessed"].concat(E.ACTIVE.map((m) => m.id));
+    const rows: (string | number)[][] = [head];
+    S.cohort!.participants.forEach((p) =>
+      p.obs.forEach((o, ti) => {
+        if (clean && o.missing) return;
+        rows.push(
+          ([p.sid, E.TIMEPOINTS[ti].id, E.TIMEPOINTS[ti].week, o.missing ? 0 : 1] as (string | number)[]).concat(
+            E.ACTIVE.map((m) => {
+              if (o.missing) return "";
+              const v = o.values[m.id];
+              if (clean && !E.valid(m.id, v)) return "";
+              return v ?? "";
+            })
+          )
+        );
+      })
+    );
+    download(`${clean ? "analytical" : "raw"}-dataset-synthetic-v4.csv`, rows.map((r) => r.join(",")).join("\n"));
+  };
+  const exportClustersCsv = () => {
+    if (!run || !cur) return;
+    const rows: (string | number)[][] = [["study_id", "cluster", "algorithm", "k", "seed", "feature_set", "missing_strategy"]];
+    run.feat.keep.forEach((i, r) => rows.push([S.cohort!.participants[i].sid, cur.lab[r] + 1, run.algo, S.k, run.seed, run.featureSet, run.missing]));
+    download(`cluster-assignments-k${S.k}-${run.algo}.csv`, rows.map((r) => r.join(",")).join("\n"));
+  };
+  const exportPerf = () => {
+    const c = S.clf;
+    if (!c) return;
+    const rows: (string | number)[][] = [
+      ["metric", "value"],
+      ["accuracy", c.accuracy.toFixed(4)],
+      ["balanced_accuracy", c.balanced.toFixed(4)],
+      ["macro_f1", c.macroF1.toFixed(4)],
+      ["n_train", c.nTrain],
+      ["n_test", c.nTest],
+      ["n_predictors", c.nFeatures],
+    ];
+    c.perClass.forEach((p) => rows.push([`cluster_${p.c + 1}_recall`, p.rec.toFixed(4)]));
+    download(`model-performance-${S.clfModel}-${S.clfAlgo}.csv`, rows.map((r) => r.join(",")).join("\n"));
+  };
 
   let screenBody: React.ReactNode;
   switch (state.screen) {
@@ -389,7 +454,6 @@ export function RecoveryPhenotypingPlatform() {
           };
         })
       );
-      const prov = S.solutions.find((x) => x.id === S.provisional);
       screenBody = (
         <DashboardScreen
           V={{
@@ -422,16 +486,7 @@ export function RecoveryPhenotypingPlatform() {
               provisionalNote: prov ? `K = ${prov.k} · ${prov.algoName}` : "researcher decision, not automatic",
             },
             k: S.k,
-            onExportQuality: () => {
-              const rows: (string | number)[][] = [["measure", "timepoint", "present", "missing", "pct_missing"]];
-              E.ACTIVE.forEach((m) =>
-                E.TIMEPOINTS.forEach((tp, i) => {
-                  const c = S.quality!.grid[i].byMeasure[m.id]!;
-                  rows.push([m.name, tp.id, c.present, c.missing, ((100 * c.missing) / (c.present + c.missing)).toFixed(2)]);
-                })
-              );
-              download("data-quality-synthetic-v4.csv", rows.map((r) => r.join(",")).join("\n"));
-            },
+            onExportQuality: exportQuality,
           }}
         />
       );
@@ -1008,14 +1063,7 @@ export function RecoveryPhenotypingPlatform() {
               };
               patch((s) => ({ solutions: s.solutions.concat([rec]), screen: "solutions" }));
             },
-            onExportFeatures: () => {
-              if (!run) return;
-              const rows: (string | number)[][] = [["study_id", "cluster"].concat(run.feat.names.map((n) => n.replace(/[ →]+/g, "_")))];
-              run.feat.keep.forEach((i, r) =>
-                rows.push(([S.cohort!.participants[i].sid, lab ? lab[r] + 1 : ""] as (string | number)[]).concat(run.feat.Z[r].map((v) => v.toFixed(4))))
-              );
-              download(`features-k${S.k}-${run.algo}.csv`, rows.map((r) => r.join(",")).join("\n"));
-            },
+            onExportFeatures: exportFeatures,
           }}
         />
       );
@@ -1339,6 +1387,40 @@ export function RecoveryPhenotypingPlatform() {
     }
   }
 
+  const record: { k: string; v: string }[] = [
+    ["Dataset version", `synthetic-v4 · generator seed ${S.seed} · N = ${S.cohort!.n}`],
+    ["Run timestamp", run ? run.at.toISOString().replace("T", " ").slice(0, 19) + "Z" : "—"],
+    ["Algorithm", E.ALGORITHMS.find((a) => a.id === (run ? run.algo : S.algo))!.name],
+    ["Hyperparameters", E.ALGORITHMS.find((a) => a.id === (run ? run.algo : S.algo))!.note],
+    ["Random seed", String(run ? run.seed : S.seed)],
+    ["Number of clusters", `K = ${S.k} · swept 2–8`],
+    ["Preprocessing", "direction alignment to common recovery sense → z-score per feature"],
+    [
+      "Missing-data method",
+      run ? (run.missing === "complete" ? `complete cases (${run.feat.nDropped} dropped)` : "column-mean imputation on derived features") : "—",
+    ],
+    ["Feature construction", run ? `${run.feat.setName} — ${run.feat.names.length} features` : "—"],
+    ["Measures included", used.map((m) => `${m.name} (${m.dir === "worse" ? "higher worse" : "higher better"})`).join(", ")],
+    ["Analysed sample", run ? `${run.feat.keep.length} of ${S.cohort!.n} participants` : "—"],
+    ["Validation", S.boot ? `bootstrap ×${S.boot.iters}, mean ARI ${fmt(S.boot.meanARI)}` : "not yet run"],
+    ["Sensitivity analysis", S.sens ? `${S.sens.length} alternative specifications compared` : "not yet run"],
+    ["Classifier", `${E.CLASSIFIERS.find((c) => c.id === S.clfAlgo)!.name} · ${E.EARLY_MODELS.find((m) => m.id === S.clfModel)!.info}`],
+    ["Provisional solution", prov ? `${prov.id} (marked by researcher)` : "none — no automatic selection"],
+    ["Researcher interpretations", `${Object.values(S.notes).filter(Boolean).length} cluster note(s) recorded`],
+    ["Environment", "sample UI · engine v0.4 · deterministic JS implementation"],
+  ].map(([k2, v]) => ({ k: k2, v }));
+
+  const exports: { name: string; fmt: string; go: () => void; dis?: boolean }[] = [
+    { name: "Raw longitudinal dataset", fmt: "CSV", go: () => exportRawData() },
+    { name: "Clean analytical dataset", fmt: "CSV", go: () => exportRawData(true) },
+    { name: "Feature dataset", fmt: "CSV", go: exportFeatures, dis: !run },
+    { name: "Cluster assignments", fmt: "CSV", go: exportClustersCsv, dis: !lab },
+    { name: "Data-quality report", fmt: "CSV", go: exportQuality },
+    { name: "Model performance", fmt: "CSV", go: exportPerf, dis: !S.clf },
+    { name: "Figures", fmt: "PNG · SVG · PDF", go: () => {}, dis: true },
+    { name: "Analysis report", fmt: "PDF · HTML", go: () => {}, dis: true },
+  ];
+
   return (
     <InfoTipProvider>
       <div style={{ minHeight: "100vh", background: "var(--color-bg)", color: "var(--color-text)", fontFamily: "var(--font-body)" }}>
@@ -1350,25 +1432,7 @@ export function RecoveryPhenotypingPlatform() {
           seed={state.seed}
         />
         <main style={{ maxWidth: 1480, margin: "0 auto", padding: "24px 16px 72px" }}>{screenBody}</main>
-        {state.recordOpen && (
-          <div className="dialog-backdrop" style={{ alignItems: "stretch", justifyContent: "flex-end", padding: 0 }}>
-            <div
-              style={{
-                width: "min(560px, 100%)",
-                background: "var(--color-bg)",
-                boxShadow: "var(--shadow-lg)",
-                overflow: "auto",
-                padding: 24,
-                borderLeft: "2px solid var(--color-divider)",
-              }}
-            >
-              <button className="btn btn-secondary" type="button" onClick={() => set("recordOpen", false)}>
-                Close
-              </button>
-              <p>Analysis record — TODO</p>
-            </div>
-          </div>
-        )}
+        {state.recordOpen && <AnalysisRecordDrawer V={{ record, exports, onClose: () => set("recordOpen", false) }} />}
       </div>
     </InfoTipProvider>
   );
