@@ -20,6 +20,9 @@ import type { HBarRow } from "./charts/HBarList";
 import { SolutionsScreen } from "./screens/SolutionsScreen";
 import { ProfilesScreen, type ClusterCard, type BootVals } from "./screens/ProfilesScreen";
 import type { ClusterTrajectoryLine } from "./charts/ClusterTrajectoryChart";
+import { ClassificationScreen, type ModelOpt } from "./screens/ClassificationScreen";
+import type { ConfusionMatrixData } from "./charts/ConfusionMatrix";
+import type { CalibrationCurveData } from "./charts/CalibrationCurve";
 
 type EngineModule = typeof import("@/lib/phenotype-engine");
 
@@ -1221,9 +1224,119 @@ export function RecoveryPhenotypingPlatform() {
       );
       break;
     }
-    case "classify":
-      screenBody = <div>Classification — TODO</div>;
+    case "classify": {
+      const modelOpts: ModelOpt[] = E.EARLY_MODELS.map((m) => {
+        const key = [S.k, m.id, S.clfAlgo, run?.algo, run?.featureSet, run?.missing].join("|");
+        const r = S.clfAll[key];
+        return {
+          name: m.name,
+          info: m.info,
+          on: S.clfModel === m.id,
+          acc: r ? pct1(100 * r.balanced) + " bal." : S.clfModel === m.id ? "computing…" : "not run",
+          go: () => {
+            set("clfModel", m.id);
+            if (run) runClf(E, S.cohort!, run, { clfModel: m.id });
+          },
+        };
+      });
+      const clfOpts = E.CLASSIFIERS.map((c) => ({
+        label: c.name + (c.run ? "" : " — adapter slot, not implemented"),
+        dis: !c.run,
+        op: c.run ? 1 : 0.45,
+        on: S.clfAlgo === c.id,
+        go: () => {
+          set("clfAlgo", c.id);
+          if (run) runClf(E, S.cohort!, run, { clfAlgo: c.id });
+        },
+      }));
+      const clfNote = E.CLASSIFIERS.find((c) => c.id === S.clfAlgo)!.note;
+      const algoName = E.ALGORITHMS.find((a) => a.id === S.algo)!.name;
+
+      const c2 = S.clf;
+      const clfVals = c2
+        ? {
+            accuracy: pct1(100 * c2.accuracy),
+            balanced: pct1(100 * c2.balanced),
+            macroF1: fmt(c2.macroF1),
+            split: `${c2.nTrain} train / ${c2.nTest} held out · ${c2.nFeatures} predictors · stratified, by participant`,
+            perClass: c2.perClass.map((p) => ({
+              label: "Cluster " + (p.c + 1),
+              color: E.CLUSTER_COLORS[p.c],
+              n: p.n,
+              rec: fmt(p.rec),
+              prec: fmt(p.prec),
+              spec: fmt(p.spec),
+              f1: fmt(p.f1),
+            })),
+            cases: c2.sampleCases.map((s) => ({ sid: s.sid, pred: s.pred, conf: fmt(s.conf) })),
+          }
+        : { accuracy: "—", balanced: "—", macroF1: "—", split: "computing…", perClass: [], cases: [] };
+
+      let cm: ConfusionMatrixData = { vb: "0 0 0 0", cols: [], rows: [], cells: [], axX: 0, axY: 0 };
+      let cal: CalibrationCurveData = { vb: "0 0 0 0", d1x: 0, d1y: 0, d2x: 0, d2y: 0, points: "", dots: [], ticks: [] };
+      if (c2) {
+        const cs = Math.min(58, 300 / S.k),
+          ox = 52,
+          oy = 26;
+        const cols = Array.from({ length: S.k }, (_, c) => ({ label: "C" + (c + 1), x: ox + cs * c + cs / 2, y: oy - 8 }));
+        const rows = Array.from({ length: S.k }, (_, r) => ({ label: "C" + (r + 1), lx: ox - 6, ly: oy + cs * r + cs / 2 + 3 }));
+        const cells = c2.cm.flatMap((row, r) => {
+          const tot = row.reduce((a, b) => a + b, 0) || 1;
+          return row.map((v, c) => ({
+            x: ox + cs * c,
+            y: oy + cs * r,
+            w: cs,
+            h: cs,
+            txt: v ? String(v) : "·",
+            tx: ox + cs * c + cs / 2,
+            ty: oy + cs * r + cs / 2 + 4,
+            fill: r === c ? "#ec3013" : "#201e1d",
+            op: Math.min(0.9, 0.05 + (0.85 * v) / tot),
+            ink: v / tot > 0.45 ? "#f3f2f2" : "#201e1d",
+          }));
+        });
+        cm = { vb: `0 0 ${ox + cs * S.k + 8} ${oy + cs * S.k + 26}`, cols, rows, cells, axX: ox + (cs * S.k) / 2, axY: oy + cs * S.k + 18 };
+
+        const cw3 = 300,
+          ch3 = 150,
+          pl3 = 34;
+        const gxc = (v: number) => pl3 + v * (cw3 - pl3 - 10);
+        const gyc = (v: number) => 12 + (1 - v) * (ch3 - 12 - 22);
+        const bins = c2.bins.filter((b) => b.n);
+        cal = {
+          vb: `0 0 ${cw3} ${ch3}`,
+          d1x: gxc(0),
+          d1y: gyc(0),
+          d2x: gxc(1),
+          d2y: gyc(1),
+          points: bins.map((b) => gxc(b.conf).toFixed(1) + "," + gyc(b.acc).toFixed(1)).join(" "),
+          dots: bins.map((b) => ({ x: gxc(b.conf) - 3, y: gyc(b.acc) - 3 })),
+          ticks: [
+            { x: pl3 - 5, y: gyc(0) + 3, label: "0", anchor: "end" as const },
+            { x: pl3 - 5, y: gyc(1) + 3, label: "1.0", anchor: "end" as const },
+            { x: gxc(0), y: ch3 - 6, label: "0", anchor: "middle" as const },
+            { x: gxc(0.5), y: ch3 - 6, label: "confidence 0.5", anchor: "middle" as const },
+            { x: gxc(1), y: ch3 - 6, label: "1.0", anchor: "middle" as const },
+          ],
+        };
+      }
+
+      screenBody = (
+        <ClassificationScreen
+          V={{
+            modelOpts,
+            clfOpts,
+            clfNote,
+            k: S.k,
+            algoName,
+            clf: clfVals,
+            cm,
+            cal,
+          }}
+        />
+      );
       break;
+    }
   }
 
   return (
