@@ -1,15 +1,19 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { ScreenId, MeasureId, Cohort, QualityReport, Features, ClusterMetrics, BootstrapResult, ClassifierResult } from "@/lib/types";
+import type { ScreenId, MeasureId, ToggleOpt, Cohort, QualityReport, Features, ClusterMetrics, BootstrapResult, ClassifierResult } from "@/lib/types";
 import { fmt, pct1 } from "@/lib/format";
 import { download } from "@/lib/download";
+import { gx, gy, ticks, W, PL, PR, PB } from "@/lib/svg-chart";
 import { InfoTipProvider } from "./InfoTip";
 import { Nav } from "./Nav";
 import { DashboardScreen } from "./screens/DashboardScreen";
 import { EnrolmentScreen } from "./screens/EnrolmentScreen";
 import { AssessmentEntryScreen } from "./screens/AssessmentEntryScreen";
 import { MeasuresScreen } from "./screens/MeasuresScreen";
+import { ParticipantsScreen, type RosterRow } from "./screens/ParticipantsScreen";
+import type { TrajectoryPanelData } from "./charts/TrajectoryPanel";
+import type { PopulationChartData } from "./charts/PopulationChart";
 
 type EngineModule = typeof import("@/lib/phenotype-engine");
 
@@ -547,9 +551,180 @@ export function RecoveryPhenotypingPlatform() {
       );
       break;
     }
-    case "participants":
-      screenBody = <div>Participants — TODO</div>;
+    case "participants": {
+      const CC = E.CLUSTER_COLORS;
+      const q = S.query.trim().toUpperCase();
+      const matches = S.cohort!.participants.map((p, i) => ({ p, i })).filter((x) => !q || x.p.sid.includes(q));
+      const listNote = `showing ${Math.min(60, matches.length)} of ${matches.length}`;
+      const roster: RosterRow[] = matches.slice(0, 60).map(({ p, i }) => {
+        const ci = run ? run.feat.keep.indexOf(i) : -1;
+        return {
+          sid: p.sid,
+          sel: S.selIdx === i,
+          go: () => set("selIdx", i),
+          color: lab && ci > -1 ? CC[lab[ci]] : "var(--color-neutral-300)",
+          dots: p.obs.map((o) => ({ fill: o.missing ? "var(--color-neutral-300)" : "var(--color-neutral-800)" })),
+        };
+      });
+      const sp = S.cohort!.participants[S.selIdx];
+      const spci = run ? run.feat.keep.indexOf(S.selIdx) : -1;
+      const selVals = {
+        sid: sp.sid,
+        meta: `${sp.age}y · ${sp.sex} · BMI ${sp.bmi} · symptoms ${sp.durationWeeks}w · ${sp.episodes} prior episodes · ${sp.site}`,
+        riskTag: `conventional risk: ${sp.conventional}`,
+        clusterLabel: lab && spci > -1 ? `Cluster ${lab[spci] + 1}` : "not in current analysis set",
+      };
+
+      const measureSeries = (mid: MeasureId) =>
+        E.TIMEPOINTS.map((tp, ti) => {
+          const vals = S.cohort!.participants
+            .map((p) => (p.obs[ti].missing ? null : p.obs[ti].values[mid]))
+            .filter((v): v is number => E.valid(mid, v));
+          return {
+            mean: E.mean(vals),
+            q1: E.quantile(vals, 0.25),
+            q3: E.quantile(vals, 0.75),
+            median: E.median(vals),
+            n: vals.length,
+            week: tp.week,
+            short: tp.short,
+          };
+        });
+      const domainRange = (mid: MeasureId): [number, number] => {
+        const m = E.MEASURES.find((x) => x.id === mid)!;
+        let lo = Infinity,
+          hi = -Infinity;
+        S.cohort!.participants.forEach((p) =>
+          p.obs.forEach((o) => {
+            const v = o.missing ? null : o.values[mid];
+            if (!E.valid(mid, v)) return;
+            lo = Math.min(lo, v!);
+            hi = Math.max(hi, v!);
+          })
+        );
+        const pad = (hi - lo) * 0.06;
+        return [Math.max(m.min, Math.floor(lo - pad)), Math.min(m.max, Math.ceil(hi + pad))];
+      };
+
+      const panels: TrajectoryPanelData[] = used.map((m) => {
+        const [lo, hi] = domainRange(m.id);
+        const popS = measureSeries(m.id);
+        const pw = 340,
+          ph = 168,
+          pl = 36;
+        const gxp = (w: number) => gx(w, pw, pl, 10);
+        const gyp = (v: number) => gy(v, lo, hi, ph);
+        const segs: { points: string }[] = [];
+        let curSeg: string[] = [];
+        const dots: { x: number; y: number }[] = [];
+        const gaps: { x: number; y: number }[] = [];
+        E.TIMEPOINTS.forEach((tp, ti) => {
+          const o = sp.obs[ti];
+          const v = o.missing ? null : o.values[m.id];
+          if (!E.valid(m.id, v)) {
+            if (curSeg.length > 1) segs.push({ points: curSeg.join(" ") });
+            curSeg = [];
+            gaps.push({ x: gxp(tp.week) - 3.5, y: ph - PB - 4 });
+            return;
+          }
+          curSeg.push(gxp(tp.week).toFixed(1) + "," + gyp(v!).toFixed(1));
+          dots.push({ x: gxp(tp.week) - 3, y: gyp(v!) - 3 });
+        });
+        if (curSeg.length > 1) segs.push({ points: curSeg.join(" ") });
+        const up = popS.map((s) => gxp(s.week).toFixed(1) + "," + gyp(s.q1).toFixed(1));
+        const dn = popS.map((s) => gxp(s.week).toFixed(1) + "," + gyp(s.q3).toFixed(1)).reverse();
+        return {
+          domain: m.domain,
+          name: m.name,
+          unit: m.unit ? " " + m.unit : "",
+          dirNote: m.dir === "worse" ? "higher = worse" : "higher = better",
+          vb: `0 0 ${pw} ${ph}`,
+          bandD: "M" + up.join(" L") + " L" + dn.join(" L") + " Z",
+          popPoints: popS.map((s) => gxp(s.week).toFixed(1) + "," + gyp(s.mean).toFixed(1)).join(" "),
+          segs,
+          dots,
+          gaps,
+          yTicks: ticks(lo, hi, 3).map((t) => ({ y: gyp(t), x1: pl, x2: pw - 10, lx: pl - 5, ly: gyp(t) + 3, label: t.toFixed(t % 1 ? 1 : 0) })),
+          xTicks: E.TIMEPOINTS.map((tp) => ({ x: gxp(tp.week), y: ph - 6, label: tp.short })),
+        };
+      });
+
+      const popDomains: ToggleOpt[] = used.map((m) => ({ label: m.name, on: S.popDomain === m.id, go: () => set("popDomain", m.id) }));
+      const popViews: ToggleOpt[] = (
+        [
+          ["individual", "Individuals"],
+          ["mean", "Mean + CI"],
+          ["both", "Both"],
+        ] as ["individual" | "mean" | "both", string][]
+      ).map(([id, name]) => ({ label: name, on: S.popView === id, go: () => set("popView", id) }));
+
+      const pd = used.find((m) => m.id === S.popDomain) || used[0];
+      const [plo, phi] = domainRange(pd.id);
+      const popSFull = measureSeries(pd.id);
+      const pgx = (w: number) => gx(w, W, PL, PR);
+      const pgy = (v: number) => gy(v, plo, phi, 260);
+      const showInd = S.popView !== "mean";
+      const showMean = S.popView !== "individual";
+      const spag = showInd
+        ? S.cohort!.participants
+            .filter((_, i) => i % 3 === 0)
+            .map((p) => {
+              const pts: string[] = [];
+              E.TIMEPOINTS.forEach((tp, ti) => {
+                const o = p.obs[ti];
+                const v = o.missing ? null : o.values[pd.id];
+                if (!E.valid(pd.id, v)) return;
+                pts.push(pgx(tp.week).toFixed(1) + "," + pgy(v!).toFixed(1));
+              });
+              const ci = run ? run.feat.keep.indexOf(S.cohort!.participants.indexOf(p)) : -1;
+              return { points: pts.join(" "), color: lab && ci > -1 ? CC[lab[ci]] : "#7d7979" };
+            })
+            .filter((s) => s.points)
+        : [];
+      const ciUp = popSFull.map((s) => pgx(s.week).toFixed(1) + "," + pgy(s.mean + (1.96 * (s.q3 - s.q1)) / (1.349 * Math.sqrt(s.n))).toFixed(1));
+      const ciDn = popSFull
+        .map((s) => pgx(s.week).toFixed(1) + "," + pgy(s.mean - (1.96 * (s.q3 - s.q1)) / (1.349 * Math.sqrt(s.n))).toFixed(1))
+        .reverse();
+      const pop: PopulationChartData = {
+        vb: `0 0 ${W} 260`,
+        spaghetti: spag,
+        bandOp: showMean ? 0.22 : 0,
+        bandD: showMean ? "M" + ciUp.join(" L") + " L" + ciDn.join(" L") + " Z" : "",
+        meanPoints: showMean ? popSFull.map((s) => pgx(s.week).toFixed(1) + "," + pgy(s.mean).toFixed(1)).join(" ") : "",
+        medianPoints: showMean ? popSFull.map((s) => pgx(s.week).toFixed(1) + "," + pgy(s.median).toFixed(1)).join(" ") : "",
+        meanW: 3,
+        medW: 2,
+        yTicks: ticks(plo, phi, 4).map((t) => ({ y: pgy(t), x1: PL, x2: W - PR, lx: PL - 6, ly: pgy(t) + 3, label: t.toFixed(t % 1 ? 1 : 0) })),
+        xTicks: E.TIMEPOINTS.map((tp) => ({ x: pgx(tp.week), y: 252, label: tp.short })),
+        ns: E.TIMEPOINTS.map((tp, i) => ({ x: pgx(tp.week), y: 240, label: "n=" + popSFull[i].n })),
+        caption:
+          pd.full +
+          " (" +
+          pd.name +
+          "), " +
+          (pd.dir === "worse" ? "higher = worse" : "higher = better") +
+          ". " +
+          (showInd ? "Every third participant is drawn, coloured by current cluster. " : "") +
+          (showMean ? "Red: mean with 95% confidence band. Dashed: median." : "Averages hidden — individual variation only."),
+      };
+
+      screenBody = (
+        <ParticipantsScreen
+          V={{
+            listNote,
+            roster,
+            query: S.query,
+            setQuery: (ev) => set("query", ev.target.value),
+            sel: selVals,
+            panels,
+            popDomains,
+            popViews,
+            pop,
+          }}
+        />
+      );
       break;
+    }
     case "entry": {
       const e = S.entry;
       const answered = e.odi.filter((v): v is number => v !== null);
