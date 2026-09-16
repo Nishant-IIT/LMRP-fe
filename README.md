@@ -1,36 +1,32 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# RE:PHENO — Recovery Phenotyping Platform
 
-## Getting Started
+An MSK (musculoskeletal) recovery phenotyping research tool, built with Next.js (App Router) and TypeScript. It runs entirely client-side against a synthetic, seeded cohort: enrolment and assessment entry, data quality, phenotype discovery (k-means / hierarchical / Gaussian-mixture clustering with cluster-quality metrics and bootstrap stability), cluster profiling, and early classification (logistic regression / random forest) of cluster membership from partial follow-up data.
 
-First, run the development server:
+Styled with the "Modernist" design system (flat, red-on-white, zero border-radius, Archivo type) — see `app/globals.css`.
+
+## Getting started
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Project structure
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- `components/platform/RecoveryPhenotypingPlatform.tsx` — top-level state container and all business logic (clustering runs, bootstrap, classification, CSV exports).
+- `components/platform/screens/` — the 9 screens (Dashboard, Enrolment, Participants, Assessment entry, Measures, Discovery, Solutions, Profiles, Classification).
+- `components/platform/charts/` — shared inline-SVG chart primitives.
+- `lib/phenotype-engine.ts` — the analysis engine: synthetic cohort generator, clustering adapters, cluster metrics, bootstrap, classifiers. Deterministic from its seed.
+- `lib/glossary.ts` — the in-app glossary surfaced by every "i" info button.
 
-## Learn More
+## Testing
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+npm test        # vitest — unit tests for the analysis engine
+npx tsc --noEmit # type check
+npm run lint     # eslint
+npm run build    # production build
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+The engine (`lib/phenotype-engine.ts`) has unit test coverage since its numerics have no other correctness signal. The 9 screens are presentational translations of a fully-specified design and are verified by running the app.
