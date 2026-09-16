@@ -24,6 +24,16 @@ export const SCREENS: { id: ScreenId; name: string }[] = [
   { id: "classify", name: "Classification" },
 ];
 
+// A recurring UI shape across screens: a radio/segment/cell-button option
+// with its selection state and its own click handler, computed by the
+// parent and consumed as-is by the screen (mirrors the original's
+// `{label, on, go}` pattern used for every toggle throughout the design).
+export interface ToggleOpt {
+  label: string;
+  on: boolean;
+  go: () => void;
+}
+
 export type MeasureId = "nprs" | "odi" | "sts" | "fabq" | "pseq" | "tug";
 
 export interface Timepoint {

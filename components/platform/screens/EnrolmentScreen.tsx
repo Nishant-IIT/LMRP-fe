@@ -1,10 +1,5 @@
+import type { ToggleOpt as Opt } from "@/lib/types";
 import { Info } from "../InfoTip";
-
-interface Opt {
-  label: string;
-  on: boolean;
-  go: () => void;
-}
 
 export interface EnrolVals {
   sid: string;

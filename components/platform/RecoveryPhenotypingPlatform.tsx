@@ -8,6 +8,7 @@ import { InfoTipProvider } from "./InfoTip";
 import { Nav } from "./Nav";
 import { DashboardScreen } from "./screens/DashboardScreen";
 import { EnrolmentScreen } from "./screens/EnrolmentScreen";
+import { AssessmentEntryScreen } from "./screens/AssessmentEntryScreen";
 
 type EngineModule = typeof import("@/lib/phenotype-engine");
 
@@ -129,6 +130,25 @@ const ENTRY_DEFAULT: EntryState = {
   odi: [2, 3, 2, 1, 3, 2, null, 1, 2, 2],
   fabq: [3, 4, 2, 3],
 };
+
+const ODI_ITEMS = [
+  "Pain intensity",
+  "Personal care",
+  "Lifting",
+  "Walking",
+  "Sitting",
+  "Standing",
+  "Sleeping",
+  "Sex life",
+  "Social life",
+  "Travelling",
+];
+const FABQ_ITEMS = [
+  "Physical activity makes my pain worse",
+  "I should not do physical activities which might make my pain worse",
+  "I cannot do physical activities which might make my pain worse",
+  "Physical activity might harm my back",
+];
 
 function initialState(): PlatformState {
   return {
@@ -529,9 +549,88 @@ export function RecoveryPhenotypingPlatform() {
     case "participants":
       screenBody = <div>Participants — TODO</div>;
       break;
-    case "entry":
-      screenBody = <div>Assessment entry — TODO</div>;
+    case "entry": {
+      const e = S.entry;
+      const answered = e.odi.filter((v): v is number => v !== null);
+      const raw = answered.reduce((a, b) => a + b, 0);
+      const missing = 10 - answered.length;
+      const pct = answered.length ? (100 * raw) / (5 * answered.length) : 0;
+      const validOdi = missing <= 2;
+      const fabqScore = e.fabq.reduce<number>((a, b) => a + (b === null ? 0 : b), 0);
+      screenBody = (
+        <AssessmentEntryScreen
+          V={{
+            sid: "LBP-0142",
+            tpLabel: "T2 — week 4",
+            nprs: e.nprs,
+            sts: e.sts.toFixed(1),
+            fabqScore,
+            odiRaw: raw,
+            odiMax: 5 * answered.length,
+            odiPct: pct.toFixed(1),
+            odiMissing: missing,
+            status: validOdi ? "Valid" : "Invalid",
+            statusNote: validOdi
+              ? missing
+                ? `pro-rated over ${answered.length} sections`
+                : "all sections answered"
+              : "more than 2 sections missing",
+            statusBg: validOdi ? "var(--color-surface)" : "var(--color-accent)",
+            statusInk: validOdi ? "var(--color-text)" : "var(--color-bg)",
+            odiItems: ODI_ITEMS.map((text, i) => ({
+              text: `${i + 1}. ${text}`,
+              opts: ([0, 1, 2, 3, 4, 5, null] as (number | null)[]).map((v) => ({
+                label: v === null ? "—" : String(v),
+                on: e.odi[i] === v,
+                go: () => {
+                  const next = e.odi.slice();
+                  next[i] = v;
+                  setEntry({ odi: next });
+                },
+              })),
+            })),
+            fabqItems: FABQ_ITEMS.map((text, i) => ({
+              text: `${i + 1}. ${text}`,
+              opts: [0, 1, 2, 3, 4, 5, 6].map((v) => ({
+                label: String(v),
+                on: e.fabq[i] === v,
+                go: () => {
+                  const next = e.fabq.slice();
+                  next[i] = v;
+                  setEntry({ fabq: next });
+                },
+              })),
+            })),
+            payload:
+              "study_id: LBP-0142\ntimepoint: T2\nnprs_items: [" +
+              e.nprs +
+              "]\nodi_items: [" +
+              e.odi.map((v) => (v === null ? "null" : v)).join(", ") +
+              "]\nodi_raw: " +
+              raw +
+              "\nodi_index: " +
+              pct.toFixed(1) +
+              "\nodi_missing_items: " +
+              missing +
+              "\nodi_status: " +
+              (validOdi ? "valid" : "invalid") +
+              "\nsts_seconds: " +
+              e.sts.toFixed(1) +
+              "\nfabq_items: [" +
+              e.fabq.join(", ") +
+              "]\nfabq_raw: " +
+              fabqScore +
+              "\ncompleteness: " +
+              ((100 * (answered.length + 1 + 1 + e.fabq.filter((v) => v !== null).length)) / 16).toFixed(0) +
+              "%",
+            setNprs: (ev) => setEntry({ nprs: +ev.target.value }),
+            setSts: (ev) => setEntry({ sts: +ev.target.value }),
+            onReset: () => set("entry", { ...ENTRY_DEFAULT }),
+          }}
+        />
+      );
       break;
+    }
     case "measures":
       screenBody = <div>Measures — TODO</div>;
       break;
