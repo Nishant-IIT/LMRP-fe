@@ -9,6 +9,7 @@ import { Nav } from "./Nav";
 import { DashboardScreen } from "./screens/DashboardScreen";
 import { EnrolmentScreen } from "./screens/EnrolmentScreen";
 import { AssessmentEntryScreen } from "./screens/AssessmentEntryScreen";
+import { MeasuresScreen } from "./screens/MeasuresScreen";
 
 type EngineModule = typeof import("@/lib/phenotype-engine");
 
@@ -631,9 +632,57 @@ export function RecoveryPhenotypingPlatform() {
       );
       break;
     }
-    case "measures":
-      screenBody = <div>Measures — TODO</div>;
+    case "measures": {
+      const measureRows = E.MEASURES.map((m) => {
+        const hasData = E.ACTIVE.some((a) => a.id === m.id);
+        const on = S.enabled.includes(m.id);
+        return {
+          name: m.name,
+          full: m.full,
+          domain: m.domain,
+          range: `${m.min}–${m.max}${m.unit ? " " + m.unit : ""}`,
+          items: m.items,
+          dirOpts: (
+            [
+              ["worse", "higher = worse"],
+              ["better", "higher = better"],
+            ] as ["worse" | "better", string][]
+          ).map(([v, label]) => ({
+            label,
+            group: "dir-" + m.id,
+            on: m.dir === v,
+            go: () => {
+              m.dir = v;
+              recompute(E, S.cohort!);
+            },
+          })),
+          lock: !hasData || (on && S.enabled.length < 2),
+          stateLabel: !hasData ? "no data yet" : on ? "remove" : "add",
+          stateNote: !hasData ? "configured, not collected" : on ? "in analysis" : "excluded",
+          toggle: () => {
+            if (!hasData) return;
+            const next = on ? S.enabled.filter((x) => x !== m.id) : S.enabled.concat([m.id]);
+            if (next.length < 2) return;
+            set("enabled", next);
+            recompute(E, S.cohort!, { enabled: next });
+          },
+        };
+      });
+      const alignCards = E.ACTIVE.map((m) => ({
+        name: m.name,
+        raw: m.dir === "worse" ? "raw: higher = worse" : "raw: higher = better",
+        transform: (m.dir === "worse" ? "× −1" : "× +1") + " then z-score",
+      }));
+      const tpRows = E.TIMEPOINTS.map((tp, i) => ({
+        id: tp.id,
+        label: tp.label,
+        week: tp.week,
+        window: i === 0 ? "—" : "±" + (tp.week <= 4 ? 3 : 7) + " days",
+        n: S.quality!.grid[i].assessed,
+      }));
+      screenBody = <MeasuresScreen V={{ measureRows, alignCards, tpRows }} />;
       break;
+    }
     case "discovery":
       screenBody = <div>Discovery — TODO</div>;
       break;
