@@ -14,6 +14,9 @@ import { MeasuresScreen } from "./screens/MeasuresScreen";
 import { ParticipantsScreen, type RosterRow } from "./screens/ParticipantsScreen";
 import type { TrajectoryPanelData } from "./charts/TrajectoryPanel";
 import type { PopulationChartData } from "./charts/PopulationChart";
+import { DiscoveryScreen } from "./screens/DiscoveryScreen";
+import type { MetricLineChartData } from "./charts/MetricLineChart";
+import type { HBarRow } from "./charts/HBarList";
 
 type EngineModule = typeof import("@/lib/phenotype-engine");
 
@@ -858,9 +861,160 @@ export function RecoveryPhenotypingPlatform() {
       screenBody = <MeasuresScreen V={{ measureRows, alignCards, tpRows }} />;
       break;
     }
-    case "discovery":
-      screenBody = <div>Discovery — TODO</div>;
+    case "discovery": {
+      const featureSetOpts: ToggleOpt[] = E.FEATURE_SETS.map((f) => ({
+        label: f.name,
+        on: S.featureSet === f.id,
+        go: () => {
+          set("featureSet", f.id);
+          recompute(E, S.cohort!, { featureSet: f.id });
+        },
+      }));
+      const algoOpts = E.ALGORITHMS.map((a) => ({
+        label: a.name + (a.run ? "" : " — adapter slot, not implemented"),
+        dis: !a.run,
+        op: a.run ? 1 : 0.45,
+        on: S.algo === a.id,
+        go: () => {
+          set("algo", a.id);
+          recompute(E, S.cohort!, { algo: a.id });
+        },
+      }));
+      const missingOpts: ToggleOpt[] = (
+        [
+          ["impute", "Mean imputation on derived features"],
+          ["complete", "Complete cases only"],
+        ] as [string, string][]
+      ).map(([id, name]) => ({
+        label: name,
+        on: S.missing === id,
+        go: () => {
+          set("missing", id);
+          recompute(E, S.cohort!, { missing: id });
+        },
+      }));
+      const algoNote = E.ALGORITHMS.find((a) => a.id === S.algo)!.note;
+      const featCount = run ? `${run.feat.names.length} features from ${used.length} measures` : "building…";
+      const missingNote = run
+        ? S.missing === "complete"
+          ? `${run.feat.nDropped} participants dropped`
+          : "column means on standardised features"
+        : "";
+      const busyNote = S.busy ? "recomputing…" : "partition is reproducible from this seed";
+
+      const mdefs: [string, (m: ClusterMetrics) => number, number, string, string][] = [
+        ["Silhouette", (m) => m.silhouette, 2, "higher is better · −1 to 1", "silhouette"],
+        ["Calinski–Harabasz", (m) => m.ch, 0, "higher is better", "ch"],
+        ["Davies–Bouldin", (m) => m.db, 2, "lower is better", "db"],
+        ["Within-cluster SS", (m) => m.wss, 0, "always falls as K rises", "wss"],
+      ];
+      const metricCharts: MetricLineChartData[] = mdefs.map(([title, get, dp, hint, gkey]) => {
+        const ks = [2, 3, 4, 5, 6, 7, 8].filter((k2) => run && run.sweep[k2]);
+        const vals = ks.map((k2) => get(run!.sweep[k2]!.m));
+        const lo = Math.min(...vals),
+          hi = Math.max(...vals);
+        const cw2 = 250,
+          ch2 = 150,
+          pl2 = 42;
+        const gxm = (i: number) => pl2 + (i / 6) * (cw2 - pl2 - 10);
+        const gym = (v: number) => 12 + (1 - (v - lo) / (hi - lo || 1)) * (ch2 - 12 - 24);
+        return {
+          title,
+          hint,
+          infoId: gkey as MetricLineChartData["infoId"],
+          vb: `0 0 ${cw2} ${ch2}`,
+          selLabel: run && run.sweep[S.k] ? fmt(get(run.sweep[S.k]!.m), dp) : "—",
+          points: ks.map((k2, i) => gxm(k2 - 2).toFixed(1) + "," + gym(vals[i]).toFixed(1)).join(" "),
+          dots: ks.map((k2, i) => ({
+            x: gxm(k2 - 2) - (k2 === S.k ? 4 : 2.5),
+            y: gym(vals[i]) - (k2 === S.k ? 4 : 2.5),
+            s: k2 === S.k ? 8 : 5,
+            fill: k2 === S.k ? "#ec3013" : "#201e1d",
+          })),
+          yTicks: [lo, (lo + hi) / 2, hi].map((t) => ({
+            y: gym(t),
+            x1: pl2,
+            x2: cw2 - 10,
+            lx: pl2 - 5,
+            ly: gym(t) + 3,
+            label: Math.abs(t) > 999 ? (t / 1000).toFixed(1) + "k" : t.toFixed(dp),
+          })),
+          xTicks: ks.map((k2) => ({ x: gxm(k2 - 2), y: ch2 - 8, label: String(k2), ink: k2 === S.k ? "#ec3013" : "currentColor" })),
+        };
+      });
+
+      const sizeBars: HBarRow[] = met
+        ? met.sizes.map((n, c) => ({
+            label: "Cluster " + (c + 1),
+            color: E.CLUSTER_COLORS[c],
+            pct: (100 * n) / Math.max(...met!.sizes),
+            value: n + " · " + ((100 * n) / run!.feat.keep.length).toFixed(1) + "%",
+          }))
+        : [];
+      const sizeNote = met
+        ? `Smallest cluster holds ${met.smallest} participants (${met.smallestPct.toFixed(1)}% of ${run!.feat.keep.length} analysed). A cluster under about 5% is usually too small to profile.`
+        : "";
+      const featChips = run ? run.feat.names.map((n) => ({ name: n })) : [];
+
+      screenBody = (
+        <DiscoveryScreen
+          V={{
+            featureSetOpts,
+            featCount,
+            algoOpts,
+            algoNote,
+            missingOpts,
+            missingNote,
+            k: S.k,
+            setK: (ev) => {
+              const k = +ev.target.value;
+              patch({ k, boot: null, sens: null });
+              if (run) runClf(E, S.cohort!, run, { k });
+            },
+            seed: S.seed,
+            setSeed: (ev) => {
+              const seed = +ev.target.value || 1;
+              set("seed", seed);
+              recompute(E, S.cohort!, { seed });
+            },
+            busyNote,
+            metricCharts,
+            sizeBars,
+            sizeNote,
+            featChips,
+            onAddSolution: () => {
+              if (!met || !run) return;
+              const id = "RUN-" + String(S.solutions.length + 1).padStart(3, "0");
+              const rec: SolutionRecord = {
+                id,
+                k: S.k,
+                algo: run.algo,
+                algoName: E.ALGORITHMS.find((a) => a.id === run.algo)!.name,
+                seed: run.seed,
+                featureSet: run.feat.setName,
+                nFeat: run.feat.names.length,
+                measures: used.map((m) => m.name).join(" · "),
+                missing: run.missing === "complete" ? "complete cases" : "mean imputation",
+                n: run.feat.keep.length,
+                met,
+                stab: S.boot ? fmt(S.boot.meanARI) : null,
+                time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+              };
+              patch((s) => ({ solutions: s.solutions.concat([rec]), screen: "solutions" }));
+            },
+            onExportFeatures: () => {
+              if (!run) return;
+              const rows: (string | number)[][] = [["study_id", "cluster"].concat(run.feat.names.map((n) => n.replace(/[ →]+/g, "_")))];
+              run.feat.keep.forEach((i, r) =>
+                rows.push(([S.cohort!.participants[i].sid, lab ? lab[r] + 1 : ""] as (string | number)[]).concat(run.feat.Z[r].map((v) => v.toFixed(4))))
+              );
+              download(`features-k${S.k}-${run.algo}.csv`, rows.map((r) => r.join(",")).join("\n"));
+            },
+          }}
+        />
+      );
       break;
+    }
     case "solutions":
       screenBody = <div>Solutions — TODO</div>;
       break;
