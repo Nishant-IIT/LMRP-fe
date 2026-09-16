@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import type { ScreenId, MeasureId, Cohort, QualityReport, Features, ClusterMetrics, BootstrapResult, ClassifierResult } from "@/lib/types";
 import { fmt, pct1 } from "@/lib/format";
 import { download } from "@/lib/download";
 import { InfoTipProvider } from "./InfoTip";
 import { Nav } from "./Nav";
 import { DashboardScreen } from "./screens/DashboardScreen";
+import { EnrolmentScreen } from "./screens/EnrolmentScreen";
 
 type EngineModule = typeof import("@/lib/phenotype-engine");
 
@@ -97,6 +98,17 @@ interface PlatformState {
   engine: EngineModule | null;
 }
 
+const INCLUSION = [
+  "Age 18 to 80 at enrolment",
+  "Low back pain present for at least four weeks",
+  "Able to attend twelve weeks of follow-up",
+];
+const EXCLUSION = [
+  "Red flags suggesting serious spinal pathology",
+  "Spinal surgery within the past twelve months",
+  "Pregnancy",
+];
+
 const ENROL_DEFAULT: EnrolState = {
   age: 42,
   sex: "F",
@@ -158,18 +170,14 @@ function initialState(): PlatformState {
 
 export function RecoveryPhenotypingPlatform() {
   const [state, setState] = useState<PlatformState>(initialState);
-  // Mirrors `this.state` from the original class component: business-logic
-  // functions below read/write through this ref (via `patch`) so that a
-  // setState-then-immediately-act sequence (e.g. "set cohort, then
-  // recompute()") sees the fresh value synchronously, matching the
-  // `this.setState(patch, callback)` semantics the original relied on.
-  const stateRef = useRef(state);
-  const engineRef = useRef<EngineModule | null>(null);
 
+  // Plain functional setState — React guarantees the updater always sees the
+  // latest state, even across consecutive calls in the same tick, so no ref
+  // mirror is needed here (reading a ref during render is disallowed by
+  // react-hooks/refs, and these setters are constructed inside render-time
+  // view-model closures throughout every screen).
   function patch(update: Partial<PlatformState> | ((s: PlatformState) => Partial<PlatformState>)) {
-    const next = typeof update === "function" ? update(stateRef.current) : update;
-    stateRef.current = { ...stateRef.current, ...next };
-    setState(stateRef.current);
+    setState((s) => ({ ...s, ...(typeof update === "function" ? update(s) : update) }));
   }
 
   function set<K extends keyof PlatformState>(key: K, value: PlatformState[K]) {
@@ -184,63 +192,69 @@ export function RecoveryPhenotypingPlatform() {
     patch((s) => ({ entry: { ...s.entry, ...p } }));
   }
 
-  function recompute() {
-    const E = engineRef.current;
-    if (!E) return;
+  // recompute/runClf/runBoot/runSensitivity take the engine/cohort/run they
+  // need as explicit arguments rather than reading them back from `state`:
+  // a caller that just changed e.g. `algo` via `set()` cannot rely on
+  // `state.algo` reflecting that change yet (setState is async), so it
+  // passes the new value straight through instead. Fields that are NOT
+  // changing in the same action are read from `state` as closed over by
+  // the current render, which is exactly "current as of the action that
+  // triggered this call."
+  function recompute(
+    engine: EngineModule,
+    cohort: Cohort,
+    overrides?: { featureSet?: string; missing?: string; enabled?: MeasureId[]; algo?: string; seed?: number }
+  ) {
+    const featureSet = overrides?.featureSet ?? state.featureSet;
+    const missing = overrides?.missing ?? state.missing;
+    const enabled = overrides?.enabled ?? state.enabled;
+    const algo = overrides?.algo ?? state.algo;
+    const seed = overrides?.seed ?? state.seed;
     patch({ busy: true });
     setTimeout(() => {
-      const { featureSet, missing, enabled, algo, seed, cohort } = stateRef.current;
-      if (!cohort) return;
-      const feat = E.buildFeatures(cohort, featureSet, missing, enabled);
+      const feat = engine.buildFeatures(cohort, featureSet, missing, enabled);
       const sweep: RunState["sweep"] = {};
       for (let k = 2; k <= 8; k++) {
-        const lab = E.cluster(feat.Z, algo, k, seed);
-        sweep[k] = lab ? { lab, m: E.metrics(feat.Z, lab, k) } : null;
+        const lab = engine.cluster(feat.Z, algo, k, seed);
+        sweep[k] = lab ? { lab, m: engine.metrics(feat.Z, lab, k) } : null;
       }
-      patch({
-        run: { feat, sweep, algo, featureSet, missing, seed, enabled, at: new Date() },
-        busy: false,
-        boot: null,
-        sens: null,
-        clfAll: {},
-      });
-      runClf();
+      const run: RunState = { feat, sweep, algo, featureSet, missing, seed, enabled, at: new Date() };
+      patch({ run, busy: false, boot: null, sens: null, clfAll: {} });
+      runClf(engine, cohort, run);
     }, 20);
   }
 
-  function runClf() {
-    const E = engineRef.current;
-    const { run } = stateRef.current;
-    if (!E || !run) return;
-    const { k, clfModel, clfAlgo, cohort } = stateRef.current;
+  function runClf(engine: EngineModule, cohort: Cohort, run: RunState, overrides?: { k?: number; clfModel?: string; clfAlgo?: string }) {
+    const k = overrides?.k ?? state.k;
+    const clfModel = overrides?.clfModel ?? state.clfModel;
+    const clfAlgo = overrides?.clfAlgo ?? state.clfAlgo;
     const key = [k, clfModel, clfAlgo, run.algo, run.featureSet, run.missing].join("|");
-    if (stateRef.current.clfAll[key]) {
-      patch({ clf: stateRef.current.clfAll[key] });
+    const cached = state.clfAll[key];
+    if (cached) {
+      patch({ clf: cached });
       return;
     }
     const cur = run.sweep[k];
-    if (!cur || !cohort) return;
+    if (!cur) return;
     setTimeout(() => {
-      const r = E.runClassifier(cohort, run.feat, cur.lab, k, clfModel, clfAlgo, 21, run.enabled);
+      const r = engine.runClassifier(cohort, run.feat, cur.lab, k, clfModel, clfAlgo, 21, run.enabled);
       patch((s) => ({ clf: r, clfAll: { ...s.clfAll, [key]: r! } }));
     }, 10);
   }
 
   function runBoot() {
-    const E = engineRef.current;
-    const { run, k } = stateRef.current;
-    if (!E || !run || !run.sweep[k]) return;
+    const { engine, run, k, cohort, bootIters } = state;
+    if (!engine || !run || !cohort || !run.sweep[k]) return;
     patch({ bootBusy: true });
     setTimeout(() => {
-      const b = E.bootstrap(run.feat.Z, run.algo, k, Math.max(10, Math.min(200, stateRef.current.bootIters)), 99);
+      const b = engine.bootstrap(run.feat.Z, run.algo, k, Math.max(10, Math.min(200, bootIters)), 99);
       patch({ boot: b, bootBusy: false });
     }, 30);
   }
 
   function runSensitivity() {
-    const E = engineRef.current;
-    const { run, k, cohort } = stateRef.current;
-    if (!E || !run || !run.sweep[k] || !cohort) return;
+    const { engine, run, k, cohort } = state;
+    if (!engine || !run || !cohort || !run.sweep[k]) return;
     patch({ sensBusy: true });
     setTimeout(() => {
       const base = run.sweep[k]!.lab;
@@ -257,15 +271,15 @@ export function RecoveryPhenotypingPlatform() {
         if (v.algo === run.algo) return;
         if (v.featureSet === run.featureSet) return;
         if (v.missing === run.missing) return;
-        const feat = v.featureSet || v.missing ? E.buildFeatures(cohort, v.featureSet || run.featureSet, v.missing || run.missing, run.enabled) : run.feat;
-        const lab = E.cluster(feat.Z, v.algo || run.algo, k, v.seed || run.seed);
+        const feat = v.featureSet || v.missing ? engine.buildFeatures(cohort, v.featureSet || run.featureSet, v.missing || run.missing, run.enabled) : run.feat;
+        const lab = engine.cluster(feat.Z, v.algo || run.algo, k, v.seed || run.seed);
         if (!lab) return;
-        if (feat === run.feat) out.push({ label, ari: E.ari(base, lab) });
+        if (feat === run.feat) out.push({ label, ari: engine.ari(base, lab) });
         else {
           const shared = feat.keep.filter((i) => run.feat.keep.includes(i));
           const a = shared.map((i) => base[run.feat.keep.indexOf(i)]);
           const b = shared.map((i) => lab[feat.keep.indexOf(i)]);
-          out.push({ label, ari: E.ari(a, b) });
+          out.push({ label, ari: engine.ari(a, b) });
         }
       });
       patch({ sens: out, sensBusy: false });
@@ -277,11 +291,10 @@ export function RecoveryPhenotypingPlatform() {
     import("@/lib/phenotype-engine")
       .then((E) => {
         if (cancelled) return;
-        engineRef.current = E;
-        const cohort = E.makeCohort(300, stateRef.current.seed);
+        const cohort = E.makeCohort(300, state.seed);
         const quality = E.qualityReport(cohort);
         patch({ ready: true, cohort, quality, engine: E });
-        recompute();
+        recompute(E, cohort);
       })
       .catch((e) => {
         if (!cancelled) patch({ err: String(e) });
@@ -289,8 +302,8 @@ export function RecoveryPhenotypingPlatform() {
     return () => {
       cancelled = true;
     };
-    // Mount-only: loads the engine once. recompute()/patch() read live state
-    // via stateRef, so which render's closure runs here doesn't matter.
+    // Mount-only. `state.seed` closed over here is render #1's initial
+    // value (20260913) — correct, since nothing can change it before mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -390,9 +403,129 @@ export function RecoveryPhenotypingPlatform() {
       );
       break;
     }
-    case "enrol":
-      screenBody = <div>Enrolment — TODO</div>;
+    case "enrol": {
+      const e = S.enrol;
+      const n = S.cohort!.n;
+      const bmi = e.height > 0 ? e.weight / Math.pow(e.height / 100, 2) : 0;
+      const ageOk = e.age >= 18 && e.age <= 80;
+      const incDone = e.inc.every((v) => v === true);
+      const excClear = e.exc.every((v) => v === false);
+      const answered = e.inc.every((v) => v !== null) && e.exc.every((v) => v !== null);
+      const failed = e.inc.some((v) => v === false) || e.exc.some((v) => v === true);
+      const eligible = incDone && excClear && ageOk;
+      const base = new Date("2026-09-16T00:00:00Z");
+      const iso = (d: Date) => d.toISOString().slice(0, 10);
+      const opt2 = (list: string[], cur: string, setter: (v: string) => void) =>
+        list.map((v) => ({ label: v, on: cur === v, go: () => setter(v) }));
+      const yn = (arr: (boolean | null)[], i: number, key: "inc" | "exc") =>
+        (
+          [
+            ["yes", true],
+            ["no", false],
+          ] as [string, boolean][]
+        ).map(([label, val]) => ({
+          label,
+          on: arr[i] === val,
+          go: () => {
+            const next = arr.slice();
+            next[i] = arr[i] === val ? null : val;
+            setEnrol({ [key]: next });
+          },
+        }));
+      const sid = "LBP-" + String(n + 1).padStart(4, "0");
+      screenBody = (
+        <EnrolmentScreen
+          V={{
+            sid,
+            date: iso(base),
+            age: e.age,
+            height: e.height,
+            weight: e.weight,
+            duration: e.duration,
+            episodes: e.episodes,
+            bmi: bmi ? bmi.toFixed(1) : "—",
+            durationLabel: e.duration + "w",
+            durationClass: e.duration < 6 ? "acute" : e.duration < 12 ? "sub-acute" : "persistent",
+            consent: e.consent,
+            setAge: (ev) => setEnrol({ age: +ev.target.value || 0 }),
+            setHeight: (ev) => setEnrol({ height: +ev.target.value || 0 }),
+            setWeight: (ev) => setEnrol({ weight: +ev.target.value || 0 }),
+            setDuration: (ev) => setEnrol({ duration: +ev.target.value || 0 }),
+            setEpisodes: (ev) => setEnrol({ episodes: +ev.target.value || 0 }),
+            toggleConsent: () => setEnrol({ consent: !e.consent }),
+            sexOpts: opt2(["F", "M"], e.sex, (v) => setEnrol({ sex: v as "F" | "M" })),
+            loadOpts: opt2(["Low", "Moderate", "High"], e.load, (v) => setEnrol({ load: v })),
+            siteOpts: opt2(["Site A", "Site B", "Site C"], e.site, (v) => setEnrol({ site: v })),
+            inclusion: INCLUSION.map((text, i) => ({ text, opts: yn(e.inc, i, "inc") })),
+            exclusion: EXCLUSION.map((text, i) => ({ text, opts: yn(e.exc, i, "exc") })),
+            status: !answered ? "Incomplete" : failed ? "Not eligible" : !ageOk ? "Not eligible" : "Eligible",
+            statusNote: !answered
+              ? "criteria not all recorded"
+              : !ageOk
+                ? "age outside 18–80"
+                : failed
+                  ? "screening record kept"
+                  : "may proceed to baseline",
+            statusBg: !answered ? "var(--color-surface)" : eligible ? "var(--color-surface)" : "var(--color-accent)",
+            statusInk: !answered || eligible ? "var(--color-text)" : "var(--color-bg)",
+            blocked: !(eligible && e.consent),
+            actionNote: !eligible
+              ? "Blocked until every criterion is recorded and met."
+              : !e.consent
+                ? "Blocked until consent is recorded."
+                : "Enrolling is disabled in the sample.",
+            schedule: E.TIMEPOINTS.map((tp, i) => {
+              const d = new Date(base.getTime() + tp.week * 7 * 86400000);
+              return {
+                id: tp.id,
+                label: tp.label,
+                date: iso(d),
+                window: i === 0 ? "on the day" : "±" + (tp.week <= 4 ? 3 : 7) + " days",
+                status: i === 0 ? "due" : "scheduled",
+              };
+            }),
+            payload:
+              "study_id: " +
+              sid +
+              "\nenrolled: " +
+              iso(base) +
+              "\nsite: " +
+              e.site +
+              "\nconsent_version: v2.1\nconsent_recorded: " +
+              (e.consent ? "true" : "false") +
+              "\neligibility_inclusion: [" +
+              e.inc.map((v) => (v === null ? "null" : v)).join(", ") +
+              "]" +
+              "\neligibility_exclusion: [" +
+              e.exc.map((v) => (v === null ? "null" : v)).join(", ") +
+              "]" +
+              "\nage_years: " +
+              e.age +
+              "\nsex: " +
+              e.sex +
+              "\nheight_cm: " +
+              e.height +
+              "\nweight_kg: " +
+              e.weight +
+              "\nbmi: " +
+              (bmi ? bmi.toFixed(1) : "null") +
+              "  # derived" +
+              "\nsymptom_duration_weeks: " +
+              e.duration +
+              "\nprior_episodes: " +
+              e.episodes +
+              "\noccupational_loading: " +
+              e.load +
+              "\nconventional_risk_group: null  # assigned after baseline scores exist" +
+              "\nassessments: 0 of " +
+              E.TIMEPOINTS.length,
+            onEnrol: () => set("screen", "entry"),
+            onReset: () => set("enrol", { ...ENROL_DEFAULT }),
+          }}
+        />
+      );
       break;
+    }
     case "participants":
       screenBody = <div>Participants — TODO</div>;
       break;
