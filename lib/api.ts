@@ -4,6 +4,14 @@
 // (/functions/v1 here vs. /rest/v1 there).
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "http://127.0.0.1:55321";
 const API_BASE = `${SUPABASE_URL}/functions/v1`;
+// Hosted Edge Functions have JWT verification on by default (local
+// `supabase functions serve --no-verify-jwt` skips it, which is why this
+// was missing until a hosted deploy surfaced it) -- the gateway rejects
+// any request with no Authorization header before it ever reaches the
+// function. The anon key is the right credential here: this app has no
+// Supabase Auth login, so every client calls as anon, same as the
+// PostgREST reads in lib/real-data.ts already do.
+const ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "";
 
 interface ApiErrorBody {
   error?: { code: string; message: string };
@@ -12,7 +20,11 @@ interface ApiErrorBody {
 async function postJson<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${API_BASE}/${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      apikey: ANON_KEY,
+      Authorization: `Bearer ${ANON_KEY}`,
+    },
     body: JSON.stringify(body),
   });
   const data = (await res.json().catch(() => ({}))) as T & ApiErrorBody;
