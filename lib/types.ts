@@ -34,6 +34,13 @@ export interface ToggleOpt {
   go: () => void;
 }
 
+// Status of an in-flight save to the real backend (enroll / submit-assessment),
+// shown next to the relevant screen's save button.
+export interface SaveStatus {
+  kind: "idle" | "saving" | "success" | "error";
+  message: string;
+}
+
 export type MeasureId = "nprs" | "odi" | "sts" | "fabq" | "pseq" | "tug";
 
 export interface Timepoint {
@@ -79,7 +86,9 @@ export interface Participant {
   bmi: number;
   durationWeeks: number;
   episodes: number;
-  conventional: "low" | "moderate" | "high";
+  // "unknown" for real participants: the backend doesn't compute a
+  // conventional risk group yet (only the synthetic generator does).
+  conventional: "low" | "moderate" | "high" | "unknown";
   site: string;
   obs: Observation[];
 }

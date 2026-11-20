@@ -1,9 +1,15 @@
-import type { ToggleOpt as Opt } from "@/lib/types";
+import type { ToggleOpt as Opt, SaveStatus } from "@/lib/types";
 import { Info } from "../InfoTip";
 
 export interface EntryVals {
-  sid: string;
-  tpLabel: string;
+  participants: { id: number; sid: string }[];
+  participantsLoading: boolean;
+  participantsError: string | null;
+  selectedParticipantId: number | null;
+  onSelectParticipant: (id: number | null) => void;
+  timepoints: { id: string; label: string }[];
+  selectedTimepointId: string;
+  onSelectTimepoint: (id: string) => void;
   nprs: number;
   sts: string;
   fabqScore: number;
@@ -21,6 +27,9 @@ export interface EntryVals {
   setNprs: (e: React.ChangeEvent<HTMLInputElement>) => void;
   setSts: (e: React.ChangeEvent<HTMLInputElement>) => void;
   onReset: () => void;
+  onSave: () => void;
+  canSave: boolean;
+  saveStatus: SaveStatus;
 }
 
 function ItemRows({ items }: { items: { text: string; opts: Opt[] }[] }) {
@@ -67,11 +76,36 @@ export function AssessmentEntryScreen({ V }: { V: EntryVals }) {
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 12 }}>
             <div className="field">
               <label>Study ID</label>
-              <input className="input mono" type="text" value={V.sid} readOnly />
+              <select
+                className="input mono"
+                value={V.selectedParticipantId ?? ""}
+                onChange={(ev) => V.onSelectParticipant(ev.target.value ? Number(ev.target.value) : null)}
+                disabled={V.participantsLoading || V.participants.length === 0}
+              >
+                <option value="">
+                  {V.participantsLoading ? "Loading…" : V.participants.length === 0 ? "No participants enrolled" : "Select a participant"}
+                </option>
+                {V.participants.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.sid}
+                  </option>
+                ))}
+              </select>
+              {V.participantsError && (
+                <div className="text-muted" style={{ fontSize: 11, marginTop: 4, color: "var(--color-accent-700)" }}>
+                  {V.participantsError}
+                </div>
+              )}
             </div>
             <div className="field">
               <label>Timepoint</label>
-              <input className="input mono" type="text" value={V.tpLabel} readOnly />
+              <select className="input mono" value={V.selectedTimepointId} onChange={(ev) => V.onSelectTimepoint(ev.target.value)}>
+                {V.timepoints.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.id} — {t.label}
+                  </option>
+                ))}
+              </select>
             </div>
             <div className="field">
               <label>Assessment date</label>
@@ -196,16 +230,26 @@ export function AssessmentEntryScreen({ V }: { V: EntryVals }) {
               {V.payload}
             </pre>
           </div>
-          <div style={{ display: "flex", gap: 8, marginTop: 16, flexWrap: "wrap" }}>
-            <button className="btn btn-primary" type="button" disabled>
+          <div style={{ display: "flex", gap: 8, marginTop: 16, flexWrap: "wrap", alignItems: "center" }}>
+            <button className="btn btn-primary" type="button" disabled={!V.canSave} onClick={V.onSave}>
               Save assessment
             </button>
             <button className="btn btn-secondary" type="button" onClick={V.onReset}>
               Reset form
             </button>
-            <span className="text-muted" style={{ fontSize: 12, alignSelf: "center" }}>
-              Saving is disabled in the sample.
+            <span className="text-muted" style={{ fontSize: 12 }}>
+              {V.canSave || V.saveStatus.kind === "saving"
+                ? `Saves to the backend at the ${V.timepoints.find((t) => t.id === V.selectedTimepointId)?.label.toLowerCase() ?? V.selectedTimepointId} visit.`
+                : "Select a participant first."}
             </span>
+            {V.saveStatus.kind !== "idle" && (
+              <span
+                className="lbl"
+                style={{ fontSize: 12, color: V.saveStatus.kind === "error" ? "var(--color-accent-700)" : "var(--color-text)" }}
+              >
+                {V.saveStatus.message}
+              </span>
+            )}
           </div>
         </section>
       </div>

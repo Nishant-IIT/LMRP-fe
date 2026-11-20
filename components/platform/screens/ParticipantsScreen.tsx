@@ -17,6 +17,8 @@ export interface ParticipantsVals {
   query: string;
   setQuery: (e: React.ChangeEvent<HTMLInputElement>) => void;
   sel: { sid: string; meta: string; riskTag: string; clusterLabel: string };
+  onEdit: () => void;
+  editDisabled: boolean;
   panels: TrajectoryPanelData[];
   popDomains: ToggleOpt[];
   popViews: ToggleOpt[];
@@ -85,6 +87,9 @@ export function ParticipantsScreen({ V }: { V: ParticipantsVals }) {
                 <Info id="conventional" />
               </span>
               <span className="tag tag-outline mono">{V.sel.clusterLabel}</span>
+              <button className="btn btn-secondary" type="button" disabled={V.editDisabled} onClick={V.onEdit}>
+                Edit enrolment
+              </button>
             </div>
           </div>
 

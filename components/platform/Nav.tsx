@@ -9,9 +9,10 @@ interface NavProps {
   onOpenRecord: () => void;
   datasetVersion: string;
   seed: number;
+  showSyntheticBanner: boolean;
 }
 
-export function Nav({ screen, onNavigate, onOpenRecord, datasetVersion, seed }: NavProps) {
+export function Nav({ screen, onNavigate, onOpenRecord, datasetVersion, seed, showSyntheticBanner }: NavProps) {
   return (
     <>
       <nav
@@ -43,36 +44,38 @@ export function Nav({ screen, onNavigate, onOpenRecord, datasetVersion, seed }: 
         </button>
       </nav>
 
-      <div
-        style={{
-          display: "flex",
-          alignItems: "baseline",
-          gap: 14,
-          flexWrap: "wrap",
-          padding: "8px 16px",
-          borderBottom: "2px solid var(--color-divider)",
-          background: "var(--color-accent-100)",
-        }}
-      >
-        <span className="tag tag-accent" style={{ fontFamily: "var(--font-heading)", fontWeight: 800 }}>
-          SYNTHETIC DATA MODE
-          <Info id="synthetic" />
-        </span>
-        <span style={{ fontSize: 12 }}>
-          No real participants. Generator: 300 cases · 6 timepoints · 4 known latent patterns · controlled
-          missingness · measurement noise. Use this to check that the pipeline recovers patterns it was given.
-        </span>
-        <span className="lbl" style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 4 }}>
-          every{" "}
-          <span className="info" style={{ cursor: "default" }}>
-            i
-          </span>{" "}
-          explains a term
-        </span>
-        <span className="lbl mono">
-          dataset {datasetVersion} · seed {seed}
-        </span>
-      </div>
+      {showSyntheticBanner && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "baseline",
+            gap: 14,
+            flexWrap: "wrap",
+            padding: "8px 16px",
+            borderBottom: "2px solid var(--color-divider)",
+            background: "var(--color-accent-100)",
+          }}
+        >
+          <span className="tag tag-accent" style={{ fontFamily: "var(--font-heading)", fontWeight: 800 }}>
+            SYNTHETIC DATA MODE
+            <Info id="synthetic" />
+          </span>
+          <span style={{ fontSize: 12 }}>
+            No real participants. Generator: 300 cases · 6 timepoints · 4 known latent patterns · controlled
+            missingness · measurement noise. Use this to check that the pipeline recovers patterns it was given.
+          </span>
+          <span className="lbl" style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 4 }}>
+            every{" "}
+            <span className="info" style={{ cursor: "default" }}>
+              i
+            </span>{" "}
+            explains a term
+          </span>
+          <span className="lbl mono">
+            dataset {datasetVersion} · seed {seed}
+          </span>
+        </div>
+      )}
     </>
   );
 }

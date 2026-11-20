@@ -1,10 +1,12 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { ScreenId, MeasureId, ToggleOpt, Cohort, QualityReport, Features, ClusterMetrics, BootstrapResult, ClassifierResult } from "@/lib/types";
+import type { ScreenId, MeasureId, ToggleOpt, SaveStatus, Cohort, Measure, QualityReport, Features, ClusterMetrics, BootstrapResult, ClassifierResult } from "@/lib/types";
 import { fmt, pct1 } from "@/lib/format";
 import { download } from "@/lib/download";
 import { gx, gy, ticks, W, PL, PR, PB } from "@/lib/svg-chart";
+import { enrollParticipant, submitAssessment, updateParticipant } from "@/lib/api";
+import { fetchRealCohort, fetchMeasures, fetchRealParticipants, fetchParticipantDetail, updateMeasure } from "@/lib/real-data";
 import { InfoTipProvider } from "./InfoTip";
 import { Nav } from "./Nav";
 import { AnalysisRecordDrawer } from "./AnalysisRecordDrawer";
@@ -47,6 +49,14 @@ export interface EntryState {
   odi: (number | null)[];
   fabq: (number | null)[];
 }
+
+const SAVE_IDLE: SaveStatus = { kind: "idle", message: "" };
+
+// Screens still driven by the synthetic in-browser cohort -- the only ones
+// that still show the "SYNTHETIC DATA MODE" banner. Dashboard, Participants,
+// and Measures now read real backend data; Enrolment and Assessment Entry
+// already did.
+const SYNTHETIC_SCREENS = new Set<ScreenId>(["discovery", "solutions", "profiles", "classify"]);
 
 export interface RunState {
   feat: Features;
@@ -106,6 +116,41 @@ interface PlatformState {
   clfAll: Record<string, ClassifierResult>;
   enrol: EnrolState;
   entry: EntryState;
+  // The real participant created by the enroll API call, if any -- distinct
+  // from the synthetic `cohort`, which stays untouched. Pre-selects
+  // `selectedParticipantId` on Assessment Entry, and while set the
+  // Enrolment screen shows a post-save confirmation (real sid/date/schedule)
+  // instead of the editable pre-save form.
+  enrolledParticipant: { id: number; sid: string; enrolledAt: string } | null;
+  enrolSave: SaveStatus;
+  entrySave: SaveStatus;
+  // Assessment Entry: full participant list (for the picker) plus which
+  // participant/timepoint is currently selected. Any enrolled participant
+  // and any of the backend's six real timepoints (T0/W2/W4/W8/W12/W24) can
+  // be chosen, not just the one just enrolled.
+  entryParticipants: { id: number; sid: string }[] | null;
+  entryParticipantsLoading: boolean;
+  entryParticipantsError: string | null;
+  selectedParticipantId: number | null;
+  selectedTimepointId: string;
+  // Enrolment screen's edit mode -- set while correcting an already-saved
+  // participant's record (distinct from enrolledParticipant, which tracks
+  // the "just enrolled, confirmation shown" case for a brand-new one).
+  editingParticipant: { id: number; sid: string; enrolledAt: string } | null;
+  editLoading: boolean;
+  editError: string | null;
+  editSave: SaveStatus;
+  // Real data for Dashboard/Participants/Measures, fetched from the backend
+  // (kept separate from the synthetic `cohort` below, which still backs
+  // Discovery/Solutions/Profiles/Classification until the analysis engine
+  // exists).
+  realCohort: Cohort | null;
+  realQuality: QualityReport | null;
+  realLoading: boolean;
+  realError: string | null;
+  realMeasures: Measure[] | null;
+  measuresLoading: boolean;
+  measuresError: string | null;
   cohort: Cohort | null;
   quality: QualityReport | null;
   // Held in state (not a ref) so the render body can read it directly —
@@ -138,6 +183,20 @@ const ENROL_DEFAULT: EnrolState = {
   inc: [null, null, null],
   exc: [null, null, null],
 };
+
+// The backend's real assessment schedule (supabase/migrations/..._measures_and_timepoints.sql),
+// distinct from the frontend's synthetic TIMEPOINTS (T0..T5 at weeks 0-12) --
+// submit-assessment only accepts these six ids, and the Enrolment screen's
+// visit-schedule table is generated from weekOffset/windowDays below to
+// match the real schedule a researcher can hand to the patient.
+const REAL_TIMEPOINTS: { id: string; label: string; weekOffset: number; windowDays: number }[] = [
+  { id: "T0", label: "Baseline", weekOffset: 0, windowDays: 3 },
+  { id: "W2", label: "Week 2", weekOffset: 2, windowDays: 3 },
+  { id: "W4", label: "Week 4", weekOffset: 4, windowDays: 3 },
+  { id: "W8", label: "Week 8", weekOffset: 8, windowDays: 7 },
+  { id: "W12", label: "Week 12", weekOffset: 12, windowDays: 7 },
+  { id: "W24", label: "Week 24", weekOffset: 24, windowDays: 7 },
+];
 
 const ENTRY_DEFAULT: EntryState = {
   nprs: 6,
@@ -197,6 +256,25 @@ function initialState(): PlatformState {
     clfAll: {},
     enrol: { ...ENROL_DEFAULT },
     entry: { ...ENTRY_DEFAULT },
+    enrolledParticipant: null,
+    enrolSave: SAVE_IDLE,
+    entrySave: SAVE_IDLE,
+    entryParticipants: null,
+    entryParticipantsLoading: false,
+    entryParticipantsError: null,
+    selectedParticipantId: null,
+    selectedTimepointId: "T0",
+    editingParticipant: null,
+    editLoading: false,
+    editError: null,
+    editSave: SAVE_IDLE,
+    realCohort: null,
+    realQuality: null,
+    realLoading: false,
+    realError: null,
+    realMeasures: null,
+    measuresLoading: false,
+    measuresError: null,
     cohort: null,
     quality: null,
     engine: null,
@@ -225,6 +303,141 @@ export function RecoveryPhenotypingPlatform() {
 
   function setEntry(p: Partial<EntryState>) {
     patch((s) => ({ entry: { ...s.entry, ...p } }));
+  }
+
+  // Reads `state.enrol` as closed over by the render that created this
+  // handler -- current as of the click that triggered it, same convention
+  // as the view-model builders below.
+  async function enrolAndSave() {
+    const e = state.enrol;
+    patch({ enrolSave: { kind: "saving", message: "Saving…" } });
+    try {
+      const result = await enrollParticipant({
+        age: e.age,
+        sex: e.sex,
+        height_cm: e.height,
+        weight_kg: e.weight,
+        duration_weeks: e.duration,
+        episodes: e.episodes,
+        occupational_load: e.load.toLowerCase() as "low" | "moderate" | "high",
+        site: e.site,
+        consent: e.consent,
+        inclusion: e.inc.map((v) => v === true),
+        exclusion: e.exc.map((v) => v === true),
+      });
+      patch({
+        enrolledParticipant: { id: result.participant.id, sid: result.participant.sid, enrolledAt: result.participant.enrolled_at },
+        selectedParticipantId: result.participant.id,
+        selectedTimepointId: "T0",
+        enrolSave: { kind: "success", message: `Saved as ${result.participant.sid}.` },
+      });
+    } catch (err) {
+      patch({ enrolSave: { kind: "error", message: err instanceof Error ? err.message : "Enrol failed." } });
+    }
+  }
+
+  // Leaves the just-saved confirmation (shown on the Enrolment screen) and
+  // moves on to collect the baseline assessment -- previously automatic on
+  // save, which meant the confirmation was never actually seen.
+  function continueToAssessment() {
+    patch({ screen: "entry" });
+  }
+
+  // Clears the confirmation so the Enrolment screen goes back to an
+  // editable, blank form for the next participant.
+  function enrolAnother() {
+    set("enrol", { ...ENROL_DEFAULT });
+    patch({ enrolledParticipant: null, enrolSave: SAVE_IDLE });
+  }
+
+  const LOAD_LABEL: Record<string, string> = { low: "Low", moderate: "Moderate", high: "High" };
+
+  // Loads an already-saved participant's record into the Enrolment form for
+  // correction, navigating there. Keyed by the real numeric id (not sid) --
+  // callers get it from entryParticipants, the same {id,sid} list Assessment
+  // Entry's picker uses.
+  async function startEditingParticipant(id: number) {
+    patch({ screen: "enrol", editLoading: true, editError: null, editingParticipant: null, editSave: SAVE_IDLE });
+    try {
+      const d = await fetchParticipantDetail(id);
+      setEnrol({
+        age: d.age,
+        sex: d.sex,
+        height: d.height_cm,
+        weight: d.weight_kg,
+        duration: d.duration_weeks,
+        episodes: d.episodes,
+        load: LOAD_LABEL[d.occupational_load] ?? d.occupational_load,
+        site: d.site,
+        consent: d.consent,
+        inc: d.inclusion_answers,
+        exc: d.exclusion_answers,
+      });
+      patch({ editingParticipant: { id: d.id, sid: d.sid, enrolledAt: d.enrolled_at }, editLoading: false });
+    } catch (err) {
+      patch({ editError: err instanceof Error ? err.message : "Failed to load participant", editLoading: false });
+    }
+  }
+
+  async function saveParticipantEdit() {
+    const target = state.editingParticipant;
+    if (!target) return;
+    const e = state.enrol;
+    patch({ editSave: { kind: "saving", message: "Saving…" } });
+    try {
+      await updateParticipant({
+        participant_id: target.id,
+        age: e.age,
+        sex: e.sex,
+        height_cm: e.height,
+        weight_kg: e.weight,
+        duration_weeks: e.duration,
+        episodes: e.episodes,
+        occupational_load: e.load.toLowerCase() as "low" | "moderate" | "high",
+        site: e.site,
+        consent: e.consent,
+        inclusion: e.inc.map((v) => v === true),
+        exclusion: e.exc.map((v) => v === true),
+      });
+      patch({ editSave: { kind: "success", message: "Changes saved." } });
+    } catch (err) {
+      patch({ editSave: { kind: "error", message: err instanceof Error ? err.message : "Save failed." } });
+    }
+  }
+
+  // Leaves edit mode without navigating -- the caller (the "Back to
+  // Participants" button) handles navigation itself.
+  function cancelEditingParticipant() {
+    set("enrol", { ...ENROL_DEFAULT });
+    patch({ editingParticipant: null, editError: null, editSave: SAVE_IDLE, screen: "participants" });
+  }
+
+  async function saveAssessment() {
+    const participantId = state.selectedParticipantId;
+    if (!participantId) {
+      patch({ entrySave: { kind: "error", message: "Select a participant first." } });
+      return;
+    }
+    const e = state.entry;
+    patch({ entrySave: { kind: "saving", message: "Saving…" } });
+    try {
+      const result = await submitAssessment({
+        participant_id: participantId,
+        timepoint_id: state.selectedTimepointId,
+        nprs: e.nprs,
+        sts: e.sts,
+        odi_items: e.odi,
+        fabq_items: e.fabq,
+      });
+      patch({
+        entrySave: {
+          kind: "success",
+          message: result.valid ? "Assessment saved." : "Saved, but flagged invalid (too many missing items).",
+        },
+      });
+    } catch (err) {
+      patch({ entrySave: { kind: "error", message: err instanceof Error ? err.message : "Save failed." } });
+    }
   }
 
   // recompute/runClf/runBoot/runSensitivity take the engine/cohort/run they
@@ -342,6 +555,76 @@ export function RecoveryPhenotypingPlatform() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Refetch real backend data every time Dashboard or Participants is
+  // navigated to, so a just-enrolled participant shows up without a full
+  // page reload (per design: refetch on navigation, not cached).
+  useEffect(() => {
+    if (state.screen !== "dashboard" && state.screen !== "participants" && state.screen !== "measures") return;
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      patch({ realLoading: true, realError: null });
+      Promise.all([fetchRealCohort(), import("@/lib/phenotype-engine")])
+        .then(([cohort, E]) => {
+          if (cancelled) return;
+          const quality = E.qualityReport(cohort);
+          patch({ realCohort: cohort, realQuality: quality, realLoading: false });
+        })
+        .catch((err) => {
+          if (!cancelled) patch({ realError: err instanceof Error ? err.message : "Failed to load real data", realLoading: false });
+        });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [state.screen]);
+
+  // Same for Measures -- also needed by Participants, which uses the real
+  // active-measure list to decide which trajectory panels to render.
+  useEffect(() => {
+    if (state.screen !== "measures" && state.screen !== "participants") return;
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      patch({ measuresLoading: true, measuresError: null });
+      fetchMeasures()
+        .then((measures) => {
+          if (!cancelled) patch({ realMeasures: measures, measuresLoading: false });
+        })
+        .catch((err) => {
+          if (!cancelled) patch({ measuresError: err instanceof Error ? err.message : "Failed to load measures", measuresLoading: false });
+        });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [state.screen]);
+
+  // Participant list for the Assessment Entry picker, refetched on
+  // navigation so a just-enrolled participant appears without a reload.
+  useEffect(() => {
+    // Also fetched for Participants -- its Edit action needs the real
+    // numeric id, which fetchRealCohort()'s reshaped Participant (shared
+    // with the synthetic-data screens) doesn't carry, only sid.
+    if (state.screen !== "entry" && state.screen !== "participants") return;
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      patch({ entryParticipantsLoading: true, entryParticipantsError: null });
+      fetchRealParticipants()
+        .then((participants) => {
+          if (!cancelled) patch({ entryParticipants: participants, entryParticipantsLoading: false });
+        })
+        .catch((err) => {
+          if (!cancelled)
+            patch({ entryParticipantsError: err instanceof Error ? err.message : "Failed to load participants", entryParticipantsLoading: false });
+        });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [state.screen]);
+
   if (!state.ready || !state.cohort || !state.quality || !state.engine) {
     return (
       <InfoTipProvider>
@@ -427,9 +710,15 @@ export function RecoveryPhenotypingPlatform() {
   let screenBody: React.ReactNode;
   switch (state.screen) {
     case "dashboard": {
+      if (S.realLoading || !S.realCohort || !S.realQuality) {
+        screenBody = <div style={{ padding: 24 }}>{S.realError ? `Failed to load real data: ${S.realError}` : "Loading…"}</div>;
+        break;
+      }
+      const rc = S.realCohort;
+      const rq = S.realQuality;
       const tpCards = E.TIMEPOINTS.map((tp, ti) => {
-        const n = S.quality!.grid[ti].assessed;
-        return { label: tp.label, n, pct: (100 * n) / S.cohort!.n, pctLabel: pct1((100 * n) / S.cohort!.n) };
+        const n = rq.grid[ti].assessed;
+        return { label: tp.label, n, pct: rc.n ? (100 * n) / rc.n : 0, pctLabel: rc.n ? pct1((100 * n) / rc.n) : "—" };
       });
       const cw = 72,
         chh = 30,
@@ -439,8 +728,8 @@ export function RecoveryPhenotypingPlatform() {
       const missRows = E.ACTIVE.map((m, r) => ({ label: m.name, y: my0 + chh * r + chh / 2 + 4 }));
       const missCells = E.ACTIVE.flatMap((m, rIdx) =>
         E.TIMEPOINTS.map((tp, i) => {
-          const c = S.quality!.grid[i].byMeasure[m.id]!;
-          const p = (100 * c.missing) / (c.missing + c.present);
+          const c = rq.grid[i].byMeasure[m.id]!;
+          const p = c.missing + c.present ? (100 * c.missing) / (c.missing + c.present) : 0;
           return {
             x: mx0 + cw * i,
             y: my0 + chh * rIdx,
@@ -459,42 +748,49 @@ export function RecoveryPhenotypingPlatform() {
           V={{
             tpCards,
             quality: {
-              completeBaseline: S.quality!.completeBaseline,
-              incompleteBaseline: S.quality!.incompleteBaseline,
-              pMissLabel: pct1(S.quality!.participantMissingness.mean),
+              completeBaseline: rq.completeBaseline,
+              incompleteBaseline: rq.incompleteBaseline,
+              pMissLabel: rc.n ? pct1(rq.participantMissingness.mean) : "—",
             },
-            flags: S.quality!.flags,
+            // No real flag-detection logic exists yet (out-of-range values,
+            // duplicates, etc.) -- real data entered through the Enrolment/
+            // Assessment forms also can't produce most of these today.
+            flags: [],
             missGrid: {
               vb: `0 0 ${mx0 + cw * 6 + 4} ${my0 + chh * E.ACTIVE.length + 6}`,
               cols: missCols,
               rows: missRows,
               cells: missCells,
             },
+            // Phenotype analysis (clustering/classification) isn't built on
+            // the backend yet -- this stays a placeholder, not fabricated
+            // synthetic numbers, now that the rest of this screen is real.
             status: {
-              algoName: E.ALGORITHMS.find((a) => a.id === S.algo)!.name,
-              featureLine: `${run ? run.feat.names.length : 0} features · ${run ? run.feat.setName : ""}`,
-              smallest: met ? `${met.smallest} (${met.smallestPct.toFixed(1)}%)` : "—",
-              sil: met ? fmt(met.silhouette) : "—",
-              db: met ? fmt(met.db) : "—",
-              stability: S.boot ? fmt(S.boot.meanARI) : "not run",
-              stabilityNote: S.boot ? `${S.boot.iters} bootstrap iterations` : "run it on the Profiles screen",
-              clfAcc: S.clf ? pct1(100 * S.clf.balanced) : "—",
-              clfNote: S.clf
-                ? `balanced accuracy · ${E.EARLY_MODELS.find((m) => m.id === S.clfModel)!.info.toLowerCase()}`
-                : "computing",
-              provisional: prov ? prov.id : "none marked",
-              provisionalNote: prov ? `K = ${prov.k} · ${prov.algoName}` : "researcher decision, not automatic",
+              algoName: "Not available yet",
+              featureLine: "Phenotype analysis isn't built yet",
+              smallest: "—",
+              sil: "—",
+              db: "—",
+              stability: "not available",
+              stabilityNote: "clustering is a later project",
+              clfAcc: "—",
+              clfNote: "classification is a later project",
+              provisional: "none",
+              provisionalNote: "no analysis engine yet",
             },
-            k: S.k,
-            onExportQuality: exportQuality,
+            k: 0,
+            onExportQuality: () => {},
           }}
         />
       );
       break;
     }
     case "enrol": {
+      if (S.editLoading || S.editError) {
+        screenBody = <div style={{ padding: 24 }}>{S.editError ? `Failed to load participant: ${S.editError}` : "Loading…"}</div>;
+        break;
+      }
       const e = S.enrol;
-      const n = S.cohort!.n;
       const bmi = e.height > 0 ? e.weight / Math.pow(e.height / 100, 2) : 0;
       const ageOk = e.age >= 18 && e.age <= 80;
       const incDone = e.inc.every((v) => v === true);
@@ -502,7 +798,12 @@ export function RecoveryPhenotypingPlatform() {
       const answered = e.inc.every((v) => v !== null) && e.exc.every((v) => v !== null);
       const failed = e.inc.some((v) => v === false) || e.exc.some((v) => v === true);
       const eligible = incDone && excClear && ageOk;
-      const base = new Date("2026-09-16T00:00:00Z");
+      // Editing an existing participant takes priority over the "just
+      // enrolled" confirmation -- the two never apply at once, since
+      // startEditingParticipant/enrolAndSave each clear the other's state.
+      const editing = S.editingParticipant;
+      const confirmed = !editing ? S.enrolledParticipant : null;
+      const base = editing ? new Date(editing.enrolledAt) : confirmed ? new Date(confirmed.enrolledAt) : new Date();
       const iso = (d: Date) => d.toISOString().slice(0, 10);
       const opt2 = (list: string[], cur: string, setter: (v: string) => void) =>
         list.map((v) => ({ label: v, on: cur === v, go: () => setter(v) }));
@@ -521,7 +822,11 @@ export function RecoveryPhenotypingPlatform() {
             setEnrol({ [key]: next });
           },
         }));
-      const sid = "LBP-" + String(n + 1).padStart(4, "0");
+      // The real study ID is generated by the backend (a Postgres sequence)
+      // only once `enroll` actually succeeds -- it can't be known or
+      // predicted before saving, so the pre-save preview says so honestly
+      // rather than showing a fabricated ID.
+      const sid = editing ? editing.sid : confirmed ? confirmed.sid : "assigned when you save";
       screenBody = (
         <EnrolmentScreen
           V={{
@@ -557,19 +862,30 @@ export function RecoveryPhenotypingPlatform() {
                   : "may proceed to baseline",
             statusBg: !answered ? "var(--color-surface)" : eligible ? "var(--color-surface)" : "var(--color-accent)",
             statusInk: !answered || eligible ? "var(--color-text)" : "var(--color-bg)",
-            blocked: !(eligible && e.consent),
-            actionNote: !eligible
-              ? "Blocked until every criterion is recorded and met."
-              : !e.consent
-                ? "Blocked until consent is recorded."
-                : "Enrolling is disabled in the sample.",
-            schedule: E.TIMEPOINTS.map((tp, i) => {
-              const d = new Date(base.getTime() + tp.week * 7 * 86400000);
+            confirmed: !!confirmed,
+            editing: !!editing,
+            editBlocked: S.editSave.kind === "saving",
+            blocked: !(eligible && e.consent) || S.enrolSave.kind === "saving",
+            actionNote: editing
+              ? S.editSave.kind === "saving"
+                ? "Saving…"
+                : "Saves changes to this participant's record."
+              : confirmed
+                ? "Give this Study ID and schedule to the participant."
+                : !eligible
+                  ? "Blocked until every criterion is recorded and met."
+                  : !e.consent
+                    ? "Blocked until consent is recorded."
+                    : S.enrolSave.kind === "saving"
+                      ? "Saving…"
+                      : "Saves a real participant via the backend.",
+            schedule: REAL_TIMEPOINTS.map((tp, i) => {
+              const d = new Date(base.getTime() + tp.weekOffset * 7 * 86400000);
               return {
                 id: tp.id,
                 label: tp.label,
                 date: iso(d),
-                window: i === 0 ? "on the day" : "±" + (tp.week <= 4 ? 3 : 7) + " days",
+                window: i === 0 ? "on the day" : "±" + tp.windowDays + " days",
                 status: i === 0 ? "due" : "scheduled",
               };
             }),
@@ -607,41 +923,64 @@ export function RecoveryPhenotypingPlatform() {
               e.load +
               "\nconventional_risk_group: null  # assigned after baseline scores exist" +
               "\nassessments: 0 of " +
-              E.TIMEPOINTS.length,
-            onEnrol: () => set("screen", "entry"),
+              REAL_TIMEPOINTS.length,
+            onEnrol: enrolAndSave,
             onReset: () => set("enrol", { ...ENROL_DEFAULT }),
+            onContinue: continueToAssessment,
+            onEnrolAnother: enrolAnother,
+            onSaveEdit: saveParticipantEdit,
+            onCancelEdit: cancelEditingParticipant,
+            saveStatus: editing ? S.editSave : S.enrolSave,
           }}
         />
       );
       break;
     }
     case "participants": {
-      const CC = E.CLUSTER_COLORS;
+      if (S.realLoading || !S.realCohort || !S.realMeasures) {
+        screenBody = <div style={{ padding: 24 }}>{S.realError ? `Failed to load real data: ${S.realError}` : "Loading…"}</div>;
+        break;
+      }
+      const realCohort = S.realCohort;
+      const usedReal = S.realMeasures.filter((m) => m.active);
+      if (!realCohort.participants.length || !usedReal.length) {
+        screenBody = (
+          <div style={{ padding: 24 }}>
+            {realCohort.participants.length ? "No active measures configured." : "No real participants enrolled yet."}
+          </div>
+        );
+        break;
+      }
+      const selIdx = Math.min(S.selIdx, realCohort.participants.length - 1);
       const q = S.query.trim().toUpperCase();
-      const matches = S.cohort!.participants.map((p, i) => ({ p, i })).filter((x) => !q || x.p.sid.includes(q));
+      const matches = realCohort.participants.map((p, i) => ({ p, i })).filter((x) => !q || x.p.sid.includes(q));
       const listNote = `showing ${Math.min(60, matches.length)} of ${matches.length}`;
-      const roster: RosterRow[] = matches.slice(0, 60).map(({ p, i }) => {
-        const ci = run ? run.feat.keep.indexOf(i) : -1;
-        return {
-          sid: p.sid,
-          sel: S.selIdx === i,
-          go: () => set("selIdx", i),
-          color: lab && ci > -1 ? CC[lab[ci]] : "var(--color-neutral-300)",
-          dots: p.obs.map((o) => ({ fill: o.missing ? "var(--color-neutral-300)" : "var(--color-neutral-800)" })),
-        };
-      });
-      const sp = S.cohort!.participants[S.selIdx];
-      const spci = run ? run.feat.keep.indexOf(S.selIdx) : -1;
+      const roster: RosterRow[] = matches.slice(0, 60).map(({ p, i }) => ({
+        sid: p.sid,
+        sel: selIdx === i,
+        go: () => set("selIdx", i),
+        // No clustering exists for real participants yet (that's the
+        // analysis-engine follow-on project) -- always the neutral,
+        // no-cluster-assigned colour.
+        color: "var(--color-neutral-300)",
+        dots: p.obs.map((o) => ({ fill: o.missing ? "var(--color-neutral-300)" : "var(--color-neutral-800)" })),
+      }));
+      const sp = realCohort.participants[selIdx];
+      // fetchRealCohort()'s reshaped Participant has no numeric id (shared
+      // with the synthetic-data screens, which have none) -- look it up by
+      // sid from entryParticipants, the same {id,sid} list Assessment
+      // Entry's picker fetches.
+      const spId = S.entryParticipants?.find((p) => p.sid === sp.sid)?.id;
       const selVals = {
         sid: sp.sid,
         meta: `${sp.age}y · ${sp.sex} · BMI ${sp.bmi} · symptoms ${sp.durationWeeks}w · ${sp.episodes} prior episodes · ${sp.site}`,
-        riskTag: `conventional risk: ${sp.conventional}`,
-        clusterLabel: lab && spci > -1 ? `Cluster ${lab[spci] + 1}` : "not in current analysis set",
+        riskTag: "conventional risk: not yet assigned",
+        clusterLabel: "not in current analysis set",
       };
 
       const measureSeries = (mid: MeasureId) =>
         E.TIMEPOINTS.map((tp, ti) => {
-          const vals = S.cohort!.participants
+          const vals = realCohort.participants
             .map((p) => (p.obs[ti].missing ? null : p.obs[ti].values[mid]))
             .filter((v): v is number => E.valid(mid, v));
           return {
@@ -655,10 +994,10 @@ export function RecoveryPhenotypingPlatform() {
           };
         });
       const domainRange = (mid: MeasureId): [number, number] => {
-        const m = E.MEASURES.find((x) => x.id === mid)!;
+        const m = usedReal.find((x) => x.id === mid)!;
         let lo = Infinity,
           hi = -Infinity;
-        S.cohort!.participants.forEach((p) =>
+        realCohort.participants.forEach((p) =>
           p.obs.forEach((o) => {
             const v = o.missing ? null : o.values[mid];
             if (!E.valid(mid, v)) return;
@@ -666,11 +1005,12 @@ export function RecoveryPhenotypingPlatform() {
             hi = Math.max(hi, v!);
           })
         );
+        if (lo > hi) [lo, hi] = [m.min, m.max];
         const pad = (hi - lo) * 0.06;
         return [Math.max(m.min, Math.floor(lo - pad)), Math.min(m.max, Math.ceil(hi + pad))];
       };
 
-      const panels: TrajectoryPanelData[] = used.map((m) => {
+      const panels: TrajectoryPanelData[] = usedReal.map((m) => {
         const [lo, hi] = domainRange(m.id);
         const popS = measureSeries(m.id);
         const pw = 340,
@@ -713,7 +1053,7 @@ export function RecoveryPhenotypingPlatform() {
         };
       });
 
-      const popDomains: ToggleOpt[] = used.map((m) => ({ label: m.name, on: S.popDomain === m.id, go: () => set("popDomain", m.id) }));
+      const popDomains: ToggleOpt[] = usedReal.map((m) => ({ label: m.name, on: S.popDomain === m.id, go: () => set("popDomain", m.id) }));
       const popViews: ToggleOpt[] = (
         [
           ["individual", "Individuals"],
@@ -722,7 +1062,7 @@ export function RecoveryPhenotypingPlatform() {
         ] as ["individual" | "mean" | "both", string][]
       ).map(([id, name]) => ({ label: name, on: S.popView === id, go: () => set("popView", id) }));
 
-      const pd = used.find((m) => m.id === S.popDomain) || used[0];
+      const pd = usedReal.find((m) => m.id === S.popDomain) || usedReal[0];
       const [plo, phi] = domainRange(pd.id);
       const popSFull = measureSeries(pd.id);
       const pgx = (w: number) => gx(w, W, PL, PR);
@@ -730,7 +1070,7 @@ export function RecoveryPhenotypingPlatform() {
       const showInd = S.popView !== "mean";
       const showMean = S.popView !== "individual";
       const spag = showInd
-        ? S.cohort!.participants
+        ? realCohort.participants
             .filter((_, i) => i % 3 === 0)
             .map((p) => {
               const pts: string[] = [];
@@ -740,8 +1080,8 @@ export function RecoveryPhenotypingPlatform() {
                 if (!E.valid(pd.id, v)) return;
                 pts.push(pgx(tp.week).toFixed(1) + "," + pgy(v!).toFixed(1));
               });
-              const ci = run ? run.feat.keep.indexOf(S.cohort!.participants.indexOf(p)) : -1;
-              return { points: pts.join(" "), color: lab && ci > -1 ? CC[lab[ci]] : "#7d7979" };
+              // No clustering for real participants yet -- single neutral colour.
+              return { points: pts.join(" "), color: "#7d7979" };
             })
             .filter((s) => s.points)
         : [];
@@ -780,6 +1120,10 @@ export function RecoveryPhenotypingPlatform() {
             query: S.query,
             setQuery: (ev) => set("query", ev.target.value),
             sel: selVals,
+            onEdit: () => {
+              if (spId !== undefined) startEditingParticipant(spId);
+            },
+            editDisabled: spId === undefined,
             panels,
             popDomains,
             popViews,
@@ -797,11 +1141,19 @@ export function RecoveryPhenotypingPlatform() {
       const pct = answered.length ? (100 * raw) / (5 * answered.length) : 0;
       const validOdi = missing <= 2;
       const fabqScore = e.fabq.reduce<number>((a, b) => a + (b === null ? 0 : b), 0);
+      const selectedParticipant = S.entryParticipants?.find((p) => p.id === S.selectedParticipantId) ?? null;
+      const selectedTimepoint = REAL_TIMEPOINTS.find((t) => t.id === S.selectedTimepointId) ?? REAL_TIMEPOINTS[0];
       screenBody = (
         <AssessmentEntryScreen
           V={{
-            sid: "LBP-0142",
-            tpLabel: "T2 — week 4",
+            participants: S.entryParticipants ?? [],
+            participantsLoading: S.entryParticipantsLoading,
+            participantsError: S.entryParticipantsError,
+            selectedParticipantId: S.selectedParticipantId,
+            onSelectParticipant: (id) => patch({ selectedParticipantId: id }),
+            timepoints: REAL_TIMEPOINTS,
+            selectedTimepointId: S.selectedTimepointId,
+            onSelectTimepoint: (id) => patch({ selectedTimepointId: id }),
             nprs: e.nprs,
             sts: e.sts.toFixed(1),
             fabqScore,
@@ -842,7 +1194,11 @@ export function RecoveryPhenotypingPlatform() {
               })),
             })),
             payload:
-              "study_id: LBP-0142\ntimepoint: T2\nnprs_items: [" +
+              "study_id: " +
+              (selectedParticipant?.sid ?? "none") +
+              "\ntimepoint: " +
+              selectedTimepoint.id +
+              "\nnprs_items: [" +
               e.nprs +
               "]\nodi_items: [" +
               e.odi.map((v) => (v === null ? "null" : v)).join(", ") +
@@ -866,15 +1222,32 @@ export function RecoveryPhenotypingPlatform() {
             setNprs: (ev) => setEntry({ nprs: +ev.target.value }),
             setSts: (ev) => setEntry({ sts: +ev.target.value }),
             onReset: () => set("entry", { ...ENTRY_DEFAULT }),
+            onSave: saveAssessment,
+            canSave: !!S.selectedParticipantId && S.entrySave.kind !== "saving",
+            saveStatus: S.entrySave,
           }}
         />
       );
       break;
     }
     case "measures": {
-      const measureRows = E.MEASURES.map((m) => {
-        const hasData = E.ACTIVE.some((a) => a.id === m.id);
-        const on = S.enabled.includes(m.id);
+      if (S.measuresLoading || !S.realMeasures) {
+        screenBody = <div style={{ padding: 24 }}>{S.measuresError ? `Failed to load: ${S.measuresError}` : "Loading…"}</div>;
+        break;
+      }
+      const realMeasures = S.realMeasures;
+      const activeCount = realMeasures.filter((m) => m.active).length;
+      const refreshMeasures = () => {
+        patch({ measuresLoading: true, measuresError: null });
+        fetchMeasures()
+          .then((measures) => patch({ realMeasures: measures, measuresLoading: false }))
+          .catch((err) =>
+            patch({ measuresError: err instanceof Error ? err.message : "Failed to load measures", measuresLoading: false })
+          );
+      };
+      const onUpdateFail = (err: unknown) => patch({ measuresError: err instanceof Error ? err.message : "Update failed" });
+      const measureRows = realMeasures.map((m) => {
+        const on = m.active;
         return {
           name: m.name,
           full: m.full,
@@ -891,33 +1264,31 @@ export function RecoveryPhenotypingPlatform() {
             group: "dir-" + m.id,
             on: m.dir === v,
             go: () => {
-              m.dir = v;
-              recompute(E, S.cohort!);
+              updateMeasure(m.id, { dir: v }).then(refreshMeasures).catch(onUpdateFail);
             },
           })),
-          lock: !hasData || (on && S.enabled.length < 2),
-          stateLabel: !hasData ? "no data yet" : on ? "remove" : "add",
-          stateNote: !hasData ? "configured, not collected" : on ? "in analysis" : "excluded",
+          lock: on && activeCount < 2,
+          stateLabel: on ? "remove" : "add",
+          stateNote: on ? "in analysis" : "excluded",
           toggle: () => {
-            if (!hasData) return;
-            const next = on ? S.enabled.filter((x) => x !== m.id) : S.enabled.concat([m.id]);
-            if (next.length < 2) return;
-            set("enabled", next);
-            recompute(E, S.cohort!, { enabled: next });
+            if (on && activeCount < 2) return;
+            updateMeasure(m.id, { active: !on }).then(refreshMeasures).catch(onUpdateFail);
           },
         };
       });
-      const alignCards = E.ACTIVE.map((m) => ({
-        name: m.name,
-        raw: m.dir === "worse" ? "raw: higher = worse" : "raw: higher = better",
-        transform: (m.dir === "worse" ? "× −1" : "× +1") + " then z-score",
-      }));
+      const alignCards = realMeasures
+        .filter((m) => m.active)
+        .map((m) => ({
+          name: m.name,
+          raw: m.dir === "worse" ? "raw: higher = worse" : "raw: higher = better",
+          transform: (m.dir === "worse" ? "× −1" : "× +1") + " then z-score",
+        }));
       const tpRows = E.TIMEPOINTS.map((tp, i) => ({
         id: tp.id,
         label: tp.label,
         week: tp.week,
         window: i === 0 ? "—" : "±" + (tp.week <= 4 ? 3 : 7) + " days",
-        n: S.quality!.grid[i].assessed,
+        n: S.realQuality ? S.realQuality.grid[i].assessed : 0,
       }));
       screenBody = <MeasuresScreen V={{ measureRows, alignCards, tpRows }} />;
       break;
@@ -1105,7 +1476,9 @@ export function RecoveryPhenotypingPlatform() {
         const groups: ("low" | "moderate" | "high")[] = ["low", "moderate", "high"];
         const tab = groups.map(() => new Array(S.k).fill(0));
         run.feat.keep.forEach((i, r) => {
-          tab[groups.indexOf(S.cohort!.participants[i].conventional)][lab[r]]++;
+          // S.cohort is always the synthetic cohort here, which never
+          // produces "unknown" -- only real participants do.
+          tab[groups.indexOf(S.cohort!.participants[i].conventional as "low" | "moderate" | "high")][lab[r]]++;
         });
         const tot = run.feat.keep.length;
         const rowN = tab.map((r) => r.reduce((a, b) => a + b, 0));
@@ -1430,6 +1803,7 @@ export function RecoveryPhenotypingPlatform() {
           onOpenRecord={() => set("recordOpen", true)}
           datasetVersion="synthetic-v4"
           seed={state.seed}
+          showSyntheticBanner={SYNTHETIC_SCREENS.has(state.screen)}
         />
         <main style={{ maxWidth: 1480, margin: "0 auto", padding: "24px 16px 72px" }}>{screenBody}</main>
         {state.recordOpen && <AnalysisRecordDrawer V={{ record, exports, onClose: () => set("recordOpen", false) }} />}

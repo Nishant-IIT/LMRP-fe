@@ -650,7 +650,9 @@ export function profile(cohort: Cohort, feat: Features, lab: number[], k: number
     });
     const convCounts = { low: 0, moderate: 0, high: 0 };
     members.forEach((p) => {
-      convCounts[p.conventional]++;
+      // Only ever called with the synthetic cohort, which never produces
+      // "unknown" -- only real participants (outside this module) do.
+      convCounts[p.conventional as "low" | "moderate" | "high"]++;
     });
     const truth = PATTERNS.map((p) => members.filter((m2) => m2.pattern === p.id).length);
     out.push({

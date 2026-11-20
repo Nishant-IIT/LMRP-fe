@@ -1,4 +1,4 @@
-import type { ToggleOpt as Opt } from "@/lib/types";
+import type { ToggleOpt as Opt, SaveStatus } from "@/lib/types";
 import { Info } from "../InfoTip";
 
 export interface EnrolVals {
@@ -34,6 +34,19 @@ export interface EnrolVals {
   payload: string;
   onEnrol: () => void;
   onReset: () => void;
+  // True once this participant has been saved -- the screen then shows a
+  // confirmation (real sid/date/schedule) instead of the editable form's
+  // save controls.
+  confirmed: boolean;
+  onContinue: () => void;
+  onEnrolAnother: () => void;
+  // True while correcting an already-saved participant's record (loaded via
+  // the Participants screen's Edit action) -- takes priority over confirmed.
+  editing: boolean;
+  editBlocked: boolean;
+  onSaveEdit: () => void;
+  onCancelEdit: () => void;
+  saveStatus: SaveStatus;
 }
 
 function Segmented({ name, opts }: { name: string; opts: Opt[] }) {
@@ -264,15 +277,45 @@ export function EnrolmentScreen({ V }: { V: EnrolVals }) {
           </div>
 
           <div style={{ display: "flex", gap: 8, marginTop: 16, flexWrap: "wrap", alignItems: "center" }}>
-            <button className="btn btn-primary" type="button" disabled={V.blocked} onClick={V.onEnrol}>
-              Enrol and open baseline visit
-            </button>
-            <button className="btn btn-secondary" type="button" onClick={V.onReset}>
-              Reset form
-            </button>
+            {V.editing ? (
+              <>
+                <button className="btn btn-primary" type="button" disabled={V.editBlocked} onClick={V.onSaveEdit}>
+                  Save changes
+                </button>
+                <button className="btn btn-secondary" type="button" onClick={V.onCancelEdit}>
+                  Back to Participants
+                </button>
+              </>
+            ) : V.confirmed ? (
+              <>
+                <button className="btn btn-primary" type="button" onClick={V.onContinue}>
+                  Continue to baseline assessment →
+                </button>
+                <button className="btn btn-secondary" type="button" onClick={V.onEnrolAnother}>
+                  Enrol another participant
+                </button>
+              </>
+            ) : (
+              <>
+                <button className="btn btn-primary" type="button" disabled={V.blocked} onClick={V.onEnrol}>
+                  Enrol and open baseline visit
+                </button>
+                <button className="btn btn-secondary" type="button" onClick={V.onReset}>
+                  Reset form
+                </button>
+              </>
+            )}
             <span className="text-muted" style={{ fontSize: 12 }}>
               {V.actionNote}
             </span>
+            {V.saveStatus.kind !== "idle" && (
+              <span
+                className="lbl"
+                style={{ fontSize: 12, color: V.saveStatus.kind === "error" ? "var(--color-accent-700)" : "var(--color-text)" }}
+              >
+                {V.saveStatus.message}
+              </span>
+            )}
           </div>
 
           <div style={{ borderLeft: "2px solid var(--color-accent)", padding: "12px 14px", marginTop: 20, background: "var(--color-accent-100)" }}>
