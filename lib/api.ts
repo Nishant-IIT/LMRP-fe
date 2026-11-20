@@ -1,8 +1,9 @@
 // Thin client for the LMRP-Be Supabase Edge Functions (enroll, submit-assessment).
-// Base URL defaults to the local Supabase stack — override with
-// NEXT_PUBLIC_API_URL for a different environment.
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:55321/functions/v1";
+// Shares NEXT_PUBLIC_SUPABASE_URL with lib/real-data.ts's PostgREST client --
+// both are the same Supabase gateway (Kong), just different routed paths
+// (/functions/v1 here vs. /rest/v1 there).
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "http://127.0.0.1:55321";
+const API_BASE = `${SUPABASE_URL}/functions/v1`;
 
 interface ApiErrorBody {
   error?: { code: string; message: string };
